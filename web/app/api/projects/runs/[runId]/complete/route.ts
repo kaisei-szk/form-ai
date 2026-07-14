@@ -121,7 +121,7 @@ export async function POST(
 
     // Trigger next queued job
     const next = await markJobDone(runId, body.status === 'success' ? 'completed' : 'failed', body.error)
-    const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3003'
+    const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3000'
     if (next) {
       fetch(`${base}/api/queue/start`, {
         method: 'POST',

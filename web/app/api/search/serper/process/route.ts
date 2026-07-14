@@ -29,11 +29,12 @@ export async function POST(req: NextRequest) {
     // Mark running
     await supabase.from('serper_jobs').update({ status: 'running', started_at: new Date().toISOString() }).eq('id', jobId)
 
-    const params = job.params as { keywords: string[]; area: string; suffixes?: string[] }
+    const params = job.params as { keywords: string[]; area: string; suffixes?: string[]; keywordMode?: 'or' | 'and' }
     const { items, error: apiErr } = await runSerperSearch({
       keywords: params.keywords,
       area: params.area,
       suffixes: params.suffixes,
+      keywordMode: params.keywordMode,
       apiKey,
     })
 

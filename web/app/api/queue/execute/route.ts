@@ -13,6 +13,7 @@ const Schema = z.object({
   area: z.string().min(1),
   areas: z.array(z.string()).optional(),            // multi-area batch mode
   keywords: z.array(z.string()).optional(),
+  keywordMode: z.enum(['or', 'and']).optional(),     // 'or'（デフォルト、合算）or 'and'（絞り込み）
   suffixes: z.array(z.string()).optional(),          // AI判定で高密度エリア時のみ設定される検索修飾語
   maxResults: z.number().int().min(0).optional(),  // 0 = unlimited
   // Radius (map-based) mode
@@ -44,9 +45,10 @@ export async function POST(req: NextRequest) {
     }
 
     const keywords = execFields.keywords ?? [execFields.industry]
+    const keywordMode = execFields.keywordMode ?? 'or'
     const suffixes = execFields.suffixes ?? []
     const maxResults = execFields.maxResults ?? 50
-    const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3003'
+    const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3000'
 
     // ── Batch mode: multiple prefectures → 1 parent + N child runs ──────────
     const isBatch = execFields.areas && execFields.areas.length > 1 && execFields.searchMode !== 'radius'
@@ -73,6 +75,7 @@ export async function POST(req: NextRequest) {
             area: label,
             areas,
             keywords,
+            keywordMode,
             maxResults,
           },
         },
@@ -88,6 +91,7 @@ export async function POST(req: NextRequest) {
           industry: execFields.industry,
           area: child.searchTarget.area,
           keywords,
+          keywordMode,
           ...(suffixes.length > 0 && { suffixes }),
           maxResults,
           projectId,
@@ -143,6 +147,7 @@ export async function POST(req: NextRequest) {
       industry: execFields.industry,
       area: execFields.area,
       keywords,
+      keywordMode,
       ...(suffixes.length > 0 && { suffixes }),
       maxResults,
       projectId,
@@ -164,6 +169,7 @@ export async function POST(req: NextRequest) {
         industry: execFields.industry,
         area: execFields.area,
         keywords,
+        keywordMode,
         maxResults,
         ...(execFields.searchMode === 'radius' && {
           searchMode: 'radius' as const,

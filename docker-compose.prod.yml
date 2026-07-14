@@ -1,9 +1,13 @@
-version: '3.8'
-
 # ===============================================
-# フォーム営業文章送信AI - 全サービス一括起動
-# 起動: docker compose up -d
-# 停止: docker compose down
+# 本番用（VPS上で稼働）: n8n + playwright-service のみ
+# Web UI本体は Vercel にデプロイするためここには含まない
+#
+# 起動: docker compose -f docker-compose.prod.yml up -d
+# 停止: docker compose -f docker-compose.prod.yml down
+#
+# 事前に .env に以下を設定しておくこと:
+#   N8N_HOST, WEBHOOK_URL, WEB_CALLBACK_URL, N8N_API_KEY, N8N_WORKFLOW_ID など
+#   (.env.example 参照)
 # ===============================================
 
 services:
@@ -16,18 +20,17 @@ services:
     ports:
       - "5678:5678"
     environment:
-      - N8N_HOST=localhost
+      - N8N_HOST=${N8N_HOST}
       - N8N_PORT=5678
-      - N8N_PROTOCOL=http
-      - WEBHOOK_URL=http://localhost:5678/
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-http}
+      - WEBHOOK_URL=${WEBHOOK_URL}
       - GENERIC_TIMEZONE=Asia/Tokyo
       - TZ=Asia/Tokyo
-      # n8n Variables（ワークフロー内で $vars.XXX で参照）
+      # n8n Variables（ワークフロー内で $env.XXX で参照）
       - N8N_VARIABLES_INCLUDE_IN_PAYLOAD=true
       - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
-      # Callback URL so n8n can notify the web service on completion
-      # host.docker.internal:3000 = Next.js web service (Docker container or `npm run dev` on host)
-      - WEB_CALLBACK_URL=http://host.docker.internal:3000
+      # Web本体（Vercel）に完了通知を送るためのURL
+      - WEB_CALLBACK_URL=${WEB_CALLBACK_URL}
       # Save execution data for debugging
       - EXECUTIONS_DATA_SAVE_ON_SUCCESS=all
       - EXECUTIONS_DATA_SAVE_ON_ERROR=all
@@ -61,38 +64,6 @@ services:
       - SENDER_NAME=${SENDER_NAME:-株式会社REMEDY}
       - SENDER_EMAIL=${SENDER_EMAIL:-}
       - SENDER_COMPANY=${SENDER_COMPANY:-株式会社REMEDY}
-    networks:
-      - form-ai-net
-
-  # Next.js Web UI
-  web:
-    build:
-      context: ./web
-      dockerfile: Dockerfile
-    container_name: form-ai-web
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      - NODE_ENV=production
-      - N8N_BASE_URL=http://n8n:5678
-      - N8N_API_KEY=${N8N_API_KEY}
-      - N8N_WORKFLOW_ID=${N8N_WORKFLOW_ID}
-      - N8N_WEBHOOK_PATH=list-collect
-      - GOOGLE_SHEETS_ID=${GOOGLE_SHEETS_ID}
-      - CONFIG_DIR=/app/config
-      # Queue concurrency (default 3 simultaneous runs)
-      - MAX_CONCURRENT_RUNS=${MAX_CONCURRENT_RUNS:-3}
-      # Internal URL used by queue/complete to trigger next job
-      - INTERNAL_BASE_URL=http://web:3000
-      - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY}
-    env_file:
-      - .env
-    volumes:
-      - ./config:/app/config:ro
-      - ./web/data:/app/data
-    depends_on:
-      - n8n
     networks:
       - form-ai-net
 

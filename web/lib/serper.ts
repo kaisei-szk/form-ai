@@ -177,17 +177,21 @@ export async function runSerperSearch(params: {
   keywords: string[]
   area: string
   suffixes?: string[]
+  keywordMode?: 'or' | 'and'
   apiKey: string
 }): Promise<{ items: SerperResultItem[]; error?: { status: number; text: string } }> {
-  const { keywords, area, suffixes, apiKey } = params
+  const { keywords, area, suffixes, keywordMode, apiKey } = params
   // エリア展開はUI/n8nのバッチ分割に委譲。ここでは単一エリアとして扱う
   const subAreas = [area]
   const pages = 10
   const SUFFIXES = (suffixes && suffixes.length > 0) ? suffixes : DEFAULT_SUFFIXES
+  // 'and' モードは全キーワードを1つのクエリに結合して絞り込み検索にする（例: "飲食店 ラーメン"）
+  // 'or'（デフォルト）はキーワードごとに独立検索して結果を合算する（同義語での網羅向け）
+  const keywordGroups = (keywordMode === 'and' && keywords.length > 0) ? [keywords.join(' ')] : keywords
 
   type QueryJob = { query: string; kw: string; subArea: string; page: number }
   const jobs: QueryJob[] = []
-  for (const kw of keywords) {
+  for (const kw of keywordGroups) {
     for (const subArea of subAreas) {
       for (const suffix of SUFFIXES) {
         const query = suffix ? `${kw} ${subArea} ${suffix}` : `${kw} ${subArea}`
@@ -198,7 +202,7 @@ export async function runSerperSearch(params: {
     }
   }
 
-  const CONCURRENCY = 20
+  const CONCURRENCY = 5
   const seenUrls = new Set<string>()
   const seenHosts = new Set<string>()
   const rawResults: SerperResultItem[] = []
@@ -240,6 +244,7 @@ export async function runSerperSearch(params: {
       }
     }
     if (hasApiError) break
+    if (i + CONCURRENCY < jobs.length) await new Promise((r) => setTimeout(r, 1100))
   }
 
   if (hasApiError) return { items: rawResults, error: hasApiError }

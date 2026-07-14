@@ -21,6 +21,7 @@ export interface SearchTarget {
   area: string
   areas?: string[]  // individual prefectures for multi-area runs (for accurate retry)
   keywords: string[]
+  keywordMode?: KeywordMode  // 'or' (default, union of keywords) or 'and' (all keywords must match)
   maxResults: number
   // Radius (map-based) mode fields — optional, only set when searchMode = 'radius'
   searchMode?: 'prefecture' | 'radius'
@@ -153,12 +154,14 @@ export interface N8nExecution {
 
 export type SearchMode = 'prefecture' | 'radius'
 export type SearchProvider = 'serper' | 'places'
+export type KeywordMode = 'or' | 'and'
 
 export interface ExecuteParams {
   industry: string
   area: string
   areas?: string[]   // multi-area single-session mode
   keywords?: string[]
+  keywordMode?: KeywordMode  // 'or' (default, union of keywords) or 'and' (all keywords must match)
   suffixes?: string[]  // AI判定で高密度エリア時のみ設定される検索修飾語
   maxResults?: number
   projectId: string

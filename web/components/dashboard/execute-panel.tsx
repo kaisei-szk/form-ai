@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Play, Loader2, CheckCircle2, XCircle, ChevronDown, Plus, FolderOpen, X, ExternalLink, Square, Sparkles, MapPin, Briefcase, Database } from 'lucide-react'
 import { useRouter } from 'next/navigation'
-import type { Preset, Project, SearchProvider } from '@/lib/types'
+import type { Preset, Project, SearchProvider, KeywordMode } from '@/lib/types'
 import { estimateCost } from '@/lib/area-data'
 import { ProjectCreateModal } from '@/components/modals/project-create-modal'
 
@@ -105,6 +105,7 @@ export default function ExecutePanel() {
   const [currentRunIds, setCurrentRunIds] = useState<string[]>([])
   const [canceling, setCanceling] = useState(false)
   const [searchProvider, setSearchProvider] = useState<SearchProvider>('serper')
+  const [keywordMode, setKeywordMode] = useState<KeywordMode>('or')
   const presetDropdownRef = useRef<HTMLDivElement>(null)
 
   // AI keyword generation
@@ -355,6 +356,7 @@ export default function ExecutePanel() {
             area: areaLabel,
             areas: effectiveAreas,
             keywords: activeKeywords,
+            keywordMode,
             suffixes: suffixes.length > 0 ? suffixes : undefined,
             searchProvider,
           }),
@@ -450,7 +452,7 @@ export default function ExecutePanel() {
       await fetch('/api/config/presets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, searchTarget: { industry: actualIndustry, area, keywords: activeKeywords } }),
+        body: JSON.stringify({ name, searchTarget: { industry: actualIndustry, area, keywords: activeKeywords, keywordMode } }),
       })
       const r = await fetch('/api/config/presets')
       const d = await r.json()
@@ -663,10 +665,40 @@ export default function ExecutePanel() {
             <Sparkles className="w-3 h-3" />
             検索キーワード
           </label>
-          {keywordsLoading
-            ? <span className="text-xs text-blue-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" />AI生成中...</span>
-            : <span className="text-xs text-gray-400">{keywords.length}個</span>
-          }
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setKeywordMode('or')}
+                disabled={isRunning}
+                title="いずれかのキーワードに一致（網羅重視）"
+                className={`text-xs px-1.5 py-0.5 rounded border transition-colors ${
+                  keywordMode === 'or'
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-500 border-gray-300 hover:border-gray-400'
+                }`}
+              >
+                OR
+              </button>
+              <button
+                type="button"
+                onClick={() => setKeywordMode('and')}
+                disabled={isRunning}
+                title="すべてのキーワードに一致（絞り込み重視）"
+                className={`text-xs px-1.5 py-0.5 rounded border transition-colors ${
+                  keywordMode === 'and'
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-500 border-gray-300 hover:border-gray-400'
+                }`}
+              >
+                AND
+              </button>
+            </div>
+            {keywordsLoading
+              ? <span className="text-xs text-blue-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" />AI生成中...</span>
+              : <span className="text-xs text-gray-400">{keywords.length}個</span>
+            }
+          </div>
         </div>
         <div className={`flex flex-wrap gap-1 min-h-[34px] bg-white border rounded px-2 py-1.5 transition-colors ${isRunning ? 'border-gray-200 opacity-60' : 'border-gray-300'}`}>
           {keywords.map((kw) => (

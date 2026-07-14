@@ -46,7 +46,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { runId: str
     if (body.status === 'error') {
       const next = await markJobDone(params.runId, 'failed', 'canceled_by_user')
       if (next) {
-        const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3003'
+        const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3000'
         fetch(`${base}/api/queue/start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

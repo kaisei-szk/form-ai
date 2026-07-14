@@ -425,6 +425,7 @@ export default function ProjectResultsPage() {
         industry: st.industry,
         area: st.area,
         keywords: st.keywords,
+        keywordMode: st.keywordMode,
         maxResults: st.maxResults,
       }
       if (st.areas && st.areas.length > 1) body.areas = st.areas

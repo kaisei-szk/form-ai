@@ -118,7 +118,7 @@ export async function syncAllRunningJobs(): Promise<{ synced: number }> {
 
 /** Trigger a queued job by calling our own queue/start endpoint internally. */
 async function triggerQueuedJob(runId: string, params: import('./types').ExecuteParams): Promise<void> {
-  const baseUrl = process.env.INTERNAL_BASE_URL || 'http://localhost:3003'
+  const baseUrl = process.env.INTERNAL_BASE_URL || 'http://localhost:3000'
   await fetch(`${baseUrl}/api/queue/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

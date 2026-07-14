@@ -5,11 +5,12 @@ import { runSerperSearch } from '@/lib/serper'
 export const maxDuration = 300
 
 const Schema = z.object({
-  keywords:   z.array(z.string()).default([]),
-  industry:   z.string().optional(),
-  area:       z.string().min(1),
-  maxResults: z.number().int().min(0).default(0),
-  suffixes:   z.array(z.string()).optional(),
+  keywords:    z.array(z.string()).default([]),
+  industry:    z.string().optional(),
+  area:        z.string().min(1),
+  maxResults:  z.number().int().min(0).default(0),
+  suffixes:    z.array(z.string()).optional(),
+  keywordMode: z.enum(['or', 'and']).optional(),
 })
 
 export async function POST(req: NextRequest) {
@@ -32,6 +33,7 @@ export async function POST(req: NextRequest) {
       keywords: body.keywords,
       area: body.area,
       suffixes: body.suffixes,
+      keywordMode: body.keywordMode,
       apiKey,
     })
 

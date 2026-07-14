@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   eslint: { ignoreDuringBuilds: true },
-  serverExternalPackages: ['postgres'],
+  output: 'standalone',
 }
 
 export default nextConfig

@@ -4,12 +4,12 @@
     {
       "id": "run-001",
       "enabled": true,
-      "label": "美容室・全国",
+      "label": "渋谷区・ヘッドスパ",
       "searchTargets": [
         {
-          "industry": "美容室",
-          "area": "全国",
-          "keywords": ["美容室", "ヘアサロン", "美容院"],
+          "industry": "ヘッドスパ",
+          "area": "東京都渋谷区",
+          "keywords": ["ヘッドスパ", "ドライヘッドスパ", "頭皮ケア", "ヘッドマッサージ"],
           "maxResults": 100
         }
       ]

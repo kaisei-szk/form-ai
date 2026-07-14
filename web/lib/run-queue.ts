@@ -23,15 +23,25 @@ function rowToJob(r: Record<string, unknown>): QueueJob {
 async function recoverStaleActiveJobs(): Promise<void> {
   if (_startupRecoveryDone) return
   _startupRecoveryDone = true
-  const sql = getSql()
-  const stale = await sql`SELECT * FROM queue_jobs WHERE status = 'active'`
-  for (const row of stale) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
+  const { data: staleRows, error } = await supabase.from('queue_jobs').select('*').eq('status', 'active')
+  if (error) throw error
+  for (const row of staleRows ?? []) {
     const job = rowToJob(row)
     const existingRun = await getProjectRun(job.runId)
     if (existingRun?.status === 'success') {
-      await sql`UPDATE queue_jobs SET status = 'completed', completed_at = ${new Date().toISOString()} WHERE id = ${job.id}`
+      const { error: updateError } = await supabase
+        .from('queue_jobs')
+        .update({ status: 'completed', completed_at: new Date().toISOString() })
+        .eq('id', job.id)
+      if (updateError) throw updateError
     } else {
-      await sql`UPDATE queue_jobs SET status = 'failed', completed_at = ${new Date().toISOString()}, error = 'server_restart' WHERE id = ${job.id}`
+      const { error: updateError } = await supabase
+        .from('queue_jobs')
+        .update({ status: 'failed', completed_at: new Date().toISOString(), error: 'server_restart' })
+        .eq('id', job.id)
+      if (updateError) throw updateError
       if (existingRun && existingRun.status !== 'error') {
         await updateRunStatus(job.runId, 'error')
       }
@@ -45,52 +55,85 @@ export async function enqueue(runId: string, projectId: string, params: ExecuteP
   queuePosition: number
 }> {
   await recoverStaleActiveJobs()
-  const sql = getSql()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
   const id = `job-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
   const createdAt = new Date().toISOString()
 
-  const activeRows = await sql`SELECT COUNT(*)::int as cnt FROM queue_jobs WHERE status = 'active'`
-  const activeCount = activeRows[0].cnt as number
-  const canStart = activeCount < MAX_CONCURRENT
+  const { count: activeCount, error: activeError } = await supabase
+    .from('queue_jobs')
+    .select('id', { count: 'exact', head: true })
+    .eq('status', 'active')
+  if (activeError) throw activeError
+  const canStart = (activeCount ?? 0) < MAX_CONCURRENT
 
-  await sql`
-    INSERT INTO queue_jobs (id, run_id, project_id, status, params, created_at)
-    VALUES (${id}, ${runId}, ${projectId}, ${canStart ? 'active' : 'waiting'}, ${sql.json(params as unknown as Parameters<typeof sql.json>[0])}, ${createdAt})
-  `
+  const { error: insertError } = await supabase.from('queue_jobs').insert({
+    id,
+    run_id: runId,
+    project_id: projectId,
+    status: canStart ? 'active' : 'waiting',
+    params,
+    created_at: createdAt,
+  })
+  if (insertError) throw insertError
 
-  const waitingRows = await sql`SELECT COUNT(*)::int as cnt FROM queue_jobs WHERE status = 'waiting'`
-  const waitingCount = (waitingRows[0].cnt as number)
+  const { count: waitingCount, error: waitingError } = await supabase
+    .from('queue_jobs')
+    .select('id', { count: 'exact', head: true })
+    .eq('status', 'waiting')
+  if (waitingError) throw waitingError
 
   return {
     job: { id, runId, projectId, status: canStart ? 'active' : 'waiting', params, createdAt },
     canStart,
-    queuePosition: canStart ? 0 : waitingCount,
+    queuePosition: canStart ? 0 : (waitingCount ?? 0),
   }
 }
 
 export async function markJobActive(runId: string): Promise<void> {
-  const sql = getSql()
-  await sql`UPDATE queue_jobs SET status = 'active', started_at = ${new Date().toISOString()} WHERE run_id = ${runId} AND status = 'waiting'`
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
+  const { error } = await supabase
+    .from('queue_jobs')
+    .update({ status: 'active', started_at: new Date().toISOString() })
+    .eq('run_id', runId)
+    .eq('status', 'waiting')
+  if (error) throw error
 }
 
 export async function markJobDone(runId: string, status: 'completed' | 'failed', error?: string): Promise<QueueJob | undefined> {
-  const sql = getSql()
-  const result = await sql`
-    UPDATE queue_jobs SET
-      status       = ${status},
-      completed_at = ${new Date().toISOString()},
-      error        = ${error ?? null}
-    WHERE run_id = ${runId} AND status = 'active'
-  `
-  if (result.count === 0) return undefined
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
+  const { data: updatedRows, error: updateError } = await supabase
+    .from('queue_jobs')
+    .update({ status, completed_at: new Date().toISOString(), error: error ?? null })
+    .eq('run_id', runId)
+    .eq('status', 'active')
+    .select('id')
+  if (updateError) throw updateError
+  if (!updatedRows || updatedRows.length === 0) return undefined
 
-  const activeRows = await sql`SELECT COUNT(*)::int as cnt FROM queue_jobs WHERE status = 'active'`
-  if ((activeRows[0].cnt as number) >= MAX_CONCURRENT) return undefined
+  const { count: activeCount, error: activeError } = await supabase
+    .from('queue_jobs')
+    .select('id', { count: 'exact', head: true })
+    .eq('status', 'active')
+  if (activeError) throw activeError
+  if ((activeCount ?? 0) >= MAX_CONCURRENT) return undefined
 
-  const nextRows = await sql`SELECT * FROM queue_jobs WHERE status = 'waiting' ORDER BY created_at ASC LIMIT 1`
-  if (nextRows.length === 0) return undefined
+  const { data: nextRows, error: nextError } = await supabase
+    .from('queue_jobs')
+    .select('*')
+    .eq('status', 'waiting')
+    .order('created_at', { ascending: true })
+    .limit(1)
+  if (nextError) throw nextError
+  if (!nextRows || nextRows.length === 0) return undefined
   const next = rowToJob(nextRows[0])
-  await sql`UPDATE queue_jobs SET status = 'active', started_at = ${new Date().toISOString()} WHERE id = ${next.id}`
+  const { error: activateError } = await supabase
+    .from('queue_jobs')
+    .update({ status: 'active', started_at: new Date().toISOString() })
+    .eq('id', next.id)
+  if (activateError) throw activateError
   return { ...next, status: 'active' }
 }
 
@@ -101,20 +144,43 @@ export async function getQueueStatus(): Promise<{
   recentJobs: QueueJob[]
 }> {
   await expireStaleRuns()
-  const sql = getSql()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
 
   // Auto-recover stale active jobs (> 2h)
   const cutoff = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
-  const recovered = await sql`
-    UPDATE queue_jobs SET status = 'failed', completed_at = ${new Date().toISOString()}, error = 'auto_expired_stale_active'
-    WHERE status = 'active' AND COALESCE(started_at, created_at) < ${cutoff}
-  `
-  if (recovered.count > 0) {
+  const { data: staleActive, error: staleError } = await supabase
+    .from('queue_jobs')
+    .select('id, started_at, created_at')
+    .eq('status', 'active')
+  if (staleError) throw staleError
+  const staleIds = (staleActive ?? [])
+    .filter((r: Record<string, unknown>) => ((r.started_at as string) ?? (r.created_at as string)) < cutoff)
+    .map((r: Record<string, unknown>) => r.id as string)
+
+  if (staleIds.length > 0) {
+    const { error: recoverError } = await supabase
+      .from('queue_jobs')
+      .update({ status: 'failed', completed_at: new Date().toISOString(), error: 'auto_expired_stale_active' })
+      .in('id', staleIds)
+    if (recoverError) throw recoverError
+
     const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3000'
-    const slots = MAX_CONCURRENT - ((await sql`SELECT COUNT(*)::int as cnt FROM queue_jobs WHERE status = 'active'`)[0].cnt as number)
+    const { count: activeAfter, error: activeAfterError } = await supabase
+      .from('queue_jobs')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'active')
+    if (activeAfterError) throw activeAfterError
+    const slots = MAX_CONCURRENT - (activeAfter ?? 0)
     if (slots > 0) {
-      const waiting = await sql`SELECT * FROM queue_jobs WHERE status = 'waiting' ORDER BY created_at ASC LIMIT ${slots}`
-      for (const row of waiting) {
+      const { data: waiting, error: waitingError } = await supabase
+        .from('queue_jobs')
+        .select('*')
+        .eq('status', 'waiting')
+        .order('created_at', { ascending: true })
+        .limit(slots)
+      if (waitingError) throw waitingError
+      for (const row of waiting ?? []) {
         const job = rowToJob(row)
         fetch(`${base}/api/queue/start`, {
           method: 'POST',
@@ -125,50 +191,77 @@ export async function getQueueStatus(): Promise<{
     }
   }
 
-  const [activeRows, waitingRows, recentRows] = await Promise.all([
-    sql`SELECT COUNT(*)::int as cnt FROM queue_jobs WHERE status = 'active'`,
-    sql`SELECT COUNT(*)::int as cnt FROM queue_jobs WHERE status = 'waiting'`,
-    sql`SELECT * FROM queue_jobs ORDER BY created_at DESC LIMIT 50`,
+  const [activeResult, waitingResult, recentResult] = await Promise.all([
+    supabase.from('queue_jobs').select('id', { count: 'exact', head: true }).eq('status', 'active'),
+    supabase.from('queue_jobs').select('id', { count: 'exact', head: true }).eq('status', 'waiting'),
+    supabase.from('queue_jobs').select('*').order('created_at', { ascending: false }).limit(50),
   ])
+  if (activeResult.error) throw activeResult.error
+  if (waitingResult.error) throw waitingResult.error
+  if (recentResult.error) throw recentResult.error
 
   return {
-    active:        activeRows[0].cnt  as number,
-    waiting:       waitingRows[0].cnt as number,
+    active:        activeResult.count  ?? 0,
+    waiting:       waitingResult.count ?? 0,
     maxConcurrent: MAX_CONCURRENT,
-    recentJobs:    recentRows.map(rowToJob),
+    recentJobs:    (recentResult.data ?? []).map(rowToJob),
   }
 }
 
 export async function getQueuePosition(runId: string): Promise<number> {
-  const sql = getSql()
-  const rows = await sql`
-    SELECT ROW_NUMBER() OVER (ORDER BY created_at ASC)::int as pos
-    FROM queue_jobs
-    WHERE status = 'waiting' AND run_id = ${runId}
-  `
-  return rows.length > 0 ? (rows[0].pos as number) : 0
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
+  const { data, error } = await supabase
+    .from('queue_jobs')
+    .select('run_id')
+    .eq('status', 'waiting')
+    .order('created_at', { ascending: true })
+  if (error) throw error
+  const index = (data ?? []).findIndex((r: Record<string, unknown>) => r.run_id === runId)
+  return index >= 0 ? index + 1 : 0
 }
 
 export async function isQueueIdle(): Promise<boolean> {
-  const sql = getSql()
-  const rows = await sql`SELECT COUNT(*)::int as cnt FROM queue_jobs WHERE status IN ('active','waiting')`
-  return (rows[0].cnt as number) === 0
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
+  const { count, error } = await supabase
+    .from('queue_jobs')
+    .select('id', { count: 'exact', head: true })
+    .in('status', ['active', 'waiting'])
+  if (error) throw error
+  return (count ?? 0) === 0
 }
 
 export async function pruneOldJobs(): Promise<void> {
-  const sql = getSql()
-  await sql`
-    DELETE FROM queue_jobs
-    WHERE status IN ('completed','failed')
-    AND id NOT IN (
-      SELECT id FROM queue_jobs WHERE status IN ('completed','failed')
-      ORDER BY COALESCE(completed_at, created_at) DESC LIMIT 200
-    )
-  `
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
+  const { data, error } = await supabase
+    .from('queue_jobs')
+    .select('id, completed_at, created_at')
+    .in('status', ['completed', 'failed'])
+  if (error) throw error
+
+  const sorted = (data ?? []).slice().sort((a: Record<string, unknown>, b: Record<string, unknown>) => {
+    const aDate = (a.completed_at as string) ?? (a.created_at as string)
+    const bDate = (b.completed_at as string) ?? (b.created_at as string)
+    return bDate.localeCompare(aDate)
+  })
+  const idsToDelete = sorted.slice(200).map((r: Record<string, unknown>) => r.id as string)
+  if (idsToDelete.length === 0) return
+
+  const { error: deleteError } = await supabase.from('queue_jobs').delete().in('id', idsToDelete)
+  if (deleteError) throw deleteError
 }
 
 export async function getJobByRunId(runId: string): Promise<QueueJob | undefined> {
-  const sql = getSql()
-  const rows = await sql`SELECT * FROM queue_jobs WHERE run_id = ${runId} ORDER BY created_at DESC LIMIT 1`
-  return rows.length > 0 ? rowToJob(rows[0]) : undefined
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
+  const { data, error } = await supabase
+    .from('queue_jobs')
+    .select('*')
+    .eq('run_id', runId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+  if (error) throw error
+  return data && data.length > 0 ? rowToJob(data[0]) : undefined
 }
