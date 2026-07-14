@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { updateRunStatus, getProjectRun, rollupBatchRun } from '@/lib/project-manager'
-import { markJobDone, isQueueIdle } from '@/lib/run-queue'
+import { markJobDone } from '@/lib/run-queue'
 import { calcCostUsd } from '@/lib/n8n-sync'
 import { addCompanies, countCompanies } from '@/lib/companies-db'
 import type { CompanyInput } from '@/lib/companies-db'
+import { getInternalJsonHeaders, requireInternalAuth } from '@/lib/internal-auth'
 
 const ResultsSchema = z.object({
   totalCompanies: z.number().int().min(0).optional(),
@@ -57,6 +58,8 @@ export async function POST(
   req: NextRequest,
   { params }: { params: { runId: string } }
 ) {
+  const unauthorized = requireInternalAuth(req)
+  if (unauthorized) return unauthorized
   try {
     const body = Schema.parse(await req.json())
     const { runId } = params
@@ -123,20 +126,11 @@ export async function POST(
     const next = await markJobDone(runId, body.status === 'success' ? 'completed' : 'failed', body.error)
     const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3000'
     if (next) {
-      fetch(`${base}/api/queue/start`, {
+      await fetch(`${base}/api/queue/start`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getInternalJsonHeaders(),
         body: JSON.stringify({ runId: next.runId, params: next.params }),
-      }).catch(() => {})
-    } else if (await isQueueIdle()) {
-      // Queue is fully drained — run DB housekeeping in the background (non-blocking).
-      // Also prune rows older than 90 days that are in terminal statuses (送信済み, スキップ)
-      // to keep the DB lean without manual intervention.
-      fetch(`${base}/api/admin/maintenance`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prune: true, daysOld: 90 }),
-      }).catch(() => {})
+      })
     }
 
     return NextResponse.json({ success: true, itemsWritten, upgraded: actualUpgraded })

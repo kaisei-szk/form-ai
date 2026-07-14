@@ -4,6 +4,10 @@ import * as http from 'http'
 import * as zlib from 'zlib'
 import { URL } from 'url'
 import { z } from 'zod'
+import { requireInternalAuth } from '@/lib/internal-auth'
+import { parsePublicHttpUrl } from '@/lib/url-safety'
+
+export const maxDuration = 300
 import OpenAI from 'openai'
 
 // ── Global concurrency guard ───────────────────────────────────────
@@ -43,7 +47,7 @@ function checkRateLimit(ip: string): { allowed: boolean; remaining: number; rese
 // Connection reuse significantly reduces latency for sequential fetches to the
 // same host (HP fetch → form page validation → probe paths).
 const _httpAgent  = new http.Agent({ keepAlive: true, maxSockets: 64, maxFreeSockets: 32 })
-const _httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64, maxFreeSockets: 32, rejectUnauthorized: false })
+const _httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 
 // ── Contact extraction constants ──────────────────────────────────────────────
 // Defined at module scope to avoid re-allocation on every request
@@ -194,11 +198,11 @@ const EXTERNAL_FORM_FAST_PASS_RE = /docs\.google\.com\/forms|forms\.gle|form\.ru
 
 const Schema = z.object({
   items: z.array(z.object({
-    url: z.string(),       // HP URL to fetch
-    baseUrl: z.string(),   // same as url (used as base for relative links)
-  })).min(1).max(3000),   // safety cap: prevent OOM from oversized requests (increased from 500 for large-prefecture runs)
+    url: z.string().url(),       // HP URL to fetch
+    baseUrl: z.string().url(),   // same as url (used as base for relative links)
+  })).min(1).max(500),
   timeoutMs: z.number().int().min(1000).max(30000).default(8000),
-  concurrency: z.number().int().min(1).max(100).default(30),
+  concurrency: z.number().int().min(1).max(30).default(20),
   fetchFormPage: z.boolean().default(true), // also fetch the detected form page
 })
 
@@ -274,7 +278,13 @@ function stripTrackingParams(url: string): string {
   } catch { return url }
 }
 
-function fetchUrl(rawUrl: string, timeoutMs: number, _depth = 0): Promise<FetchResult> {
+async function fetchUrl(rawUrl: string, timeoutMs: number, _depth = 0): Promise<FetchResult> {
+  let parsedUrl: URL
+  try {
+    parsedUrl = await parsePublicHttpUrl(rawUrl)
+  } catch (error) {
+    return { url: rawUrl, finalUrl: rawUrl, html: '', error: error instanceof Error ? error.message : 'invalid_url', statusCode: null }
+  }
   return new Promise((resolve) => {
     let resolved = false
     const done = (result: FetchResult) => {
@@ -287,10 +297,6 @@ function fetchUrl(rawUrl: string, timeoutMs: number, _depth = 0): Promise<FetchR
     if (_depth > 5) {
       return done({ url: rawUrl, finalUrl: rawUrl, html: '', error: 'too_many_redirects', statusCode: null })
     }
-
-    let parsedUrl: URL
-    try { parsedUrl = new URL(rawUrl) }
-    catch { return done({ url: rawUrl, finalUrl: rawUrl, html: '', error: 'invalid_url', statusCode: null }) }
 
     const isHttps = parsedUrl.protocol === 'https:'
     const mod = isHttps ? https : http
@@ -1718,6 +1724,8 @@ async function processBatch(
 }
 
 export async function POST(req: NextRequest) {
+  const unauthorized = requireInternalAuth(req)
+  if (unauthorized) return unauthorized
   // Per-IP rate limiting: n8n runs on the same host so its IP is effectively internal,
   // but this guards against accidental or abusive external callers.
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
@@ -1764,7 +1772,7 @@ export async function POST(req: NextRequest) {
       if (toClassify.length > 0) {
         const classified = rawResults.map((r) => ({ ...r }))
         const queue = toClassify.slice()
-        const GPT_CONCURRENCY = 50
+        const GPT_CONCURRENCY = 10
 
         const gptWorker = async () => {
           while (true) {

@@ -1,9 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { enqueue, markJobActive, markJobDone } from '@/lib/run-queue'
-import { addRunToProject, addBatchRunToProject, getProject } from '@/lib/project-manager'
+import { addRunToProject, addBatchRunToProject, getProject, rollupBatchRun, updateRunStatus } from '@/lib/project-manager'
 import { triggerWorkflow } from '@/lib/n8n-client'
 import type { ExecuteParams } from '@/lib/types'
+import { getInternalJsonHeaders } from '@/lib/internal-auth'
+
+async function startNextJob(next: Awaited<ReturnType<typeof markJobDone>>, base: string): Promise<void> {
+  if (!next) return
+  await fetch(`${base}/api/queue/start`, {
+    method: 'POST',
+    headers: getInternalJsonHeaders(),
+    body: JSON.stringify({ runId: next.runId, params: next.params }),
+  })
+}
 
 const Schema = z.object({
   runId: z.string().min(1),
@@ -106,18 +116,12 @@ export async function POST(req: NextRequest) {
           await markJobActive(child.id)
           try {
             const result = await triggerWorkflow(childParams)
-            fetch(`${base}/api/projects/runs/${child.id}`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ status: 'running', n8nExecutionId: result.executionId }),
-            }).catch(() => {})
+            await updateRunStatus(child.id, 'running', result.executionId)
           } catch (triggerErr) {
-            await markJobDone(child.id, 'failed', String(triggerErr))
-            fetch(`${base}/api/projects/runs/${child.id}`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ status: 'error' }),
-            }).catch(() => {})
+            const error = String(triggerErr)
+            const next = await markJobDone(child.id, 'failed', error)
+            await updateRunStatus(child.id, 'error', undefined, undefined, { error })
+            await startNextJob(next, base)
           }
         }
 
@@ -126,12 +130,9 @@ export async function POST(req: NextRequest) {
 
       // Promote batch parent to 'running' once at least one child has started
       if (anyChildStarted) {
-        fetch(`${base}/api/projects/runs/${runId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: 'running' }),
-        }).catch(() => {})
+        await updateRunStatus(runId, 'running')
       }
+      await rollupBatchRun(runId)
 
       return NextResponse.json({
         success: true,
@@ -198,11 +199,7 @@ export async function POST(req: NextRequest) {
     try {
       const result = await triggerWorkflow(params)
       // Update run status to running
-      await fetch(`${base}/api/projects/runs/${runId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'running', n8nExecutionId: result.executionId }),
-      }).catch(() => {})
+      await updateRunStatus(runId, 'running', result.executionId)
 
       return NextResponse.json({
         success: true,
@@ -211,12 +208,10 @@ export async function POST(req: NextRequest) {
       })
     } catch (triggerErr) {
       // Trigger failed — mark queue job as failed so it doesn't block the queue
-      await markJobDone(runId, 'failed', String(triggerErr))
-      await fetch(`${base}/api/projects/runs/${runId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'error' }),
-      }).catch(() => {})
+      const error = String(triggerErr)
+      const next = await markJobDone(runId, 'failed', error)
+      await updateRunStatus(runId, 'error', undefined, undefined, { error })
+      await startNextJob(next, base)
       throw triggerErr
     }
   } catch (e) {

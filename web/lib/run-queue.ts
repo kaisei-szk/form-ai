@@ -1,10 +1,18 @@
 import getSql from './db'
 import type { QueueJob, ExecuteParams } from './types'
-import { updateRunStatus, expireStaleRuns, getProjectRun } from './project-manager'
+import { updateRunStatus, expireStaleRuns } from './project-manager'
+import { getInternalJsonHeaders } from './internal-auth'
 
-export const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_RUNS || '3', 10)
+const configuredMaxConcurrent = Number.parseInt(process.env.MAX_CONCURRENT_RUNS || '3', 10)
+export const MAX_CONCURRENT = Number.isFinite(configuredMaxConcurrent)
+  ? Math.min(20, Math.max(1, configuredMaxConcurrent))
+  : 3
 
-let _startupRecoveryDone = false
+const SLOT_PREFIX = 'queue-slot-lease-'
+
+function isUniqueViolation(error: { code?: string } | null): boolean {
+  return error?.code === '23505'
+}
 
 function rowToJob(r: Record<string, unknown>): QueueJob {
   return {
@@ -20,32 +28,88 @@ function rowToJob(r: Record<string, unknown>): QueueJob {
   }
 }
 
-async function recoverStaleActiveJobs(): Promise<void> {
-  if (_startupRecoveryDone) return
-  _startupRecoveryDone = true
+async function acquireQueueSlot(job: QueueJob): Promise<string | undefined> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabase = getSql() as any
-  const { data: staleRows, error } = await supabase.from('queue_jobs').select('*').eq('status', 'active')
+  for (let slot = 1; slot <= MAX_CONCURRENT; slot++) {
+    const slotId = `${SLOT_PREFIX}${slot}`
+    const { error } = await supabase.from('queue_jobs').insert({
+      id: slotId,
+      run_id: `slot:${slot}:${job.runId}`,
+      project_id: job.projectId,
+      status: 'active',
+      params: job.params,
+      created_at: new Date().toISOString(),
+      error: job.runId,
+    })
+    if (!error) return slotId
+    if (!isUniqueViolation(error)) throw error
+  }
+  return undefined
+}
+
+async function releaseQueueSlotById(slotId: string): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
+  const { error } = await supabase.from('queue_jobs').delete().eq('id', slotId)
   if (error) throw error
-  for (const row of staleRows ?? []) {
-    const job = rowToJob(row)
-    const existingRun = await getProjectRun(job.runId)
-    if (existingRun?.status === 'success') {
-      const { error: updateError } = await supabase
-        .from('queue_jobs')
-        .update({ status: 'completed', completed_at: new Date().toISOString() })
-        .eq('id', job.id)
-      if (updateError) throw updateError
-    } else {
-      const { error: updateError } = await supabase
-        .from('queue_jobs')
-        .update({ status: 'failed', completed_at: new Date().toISOString(), error: 'server_restart' })
-        .eq('id', job.id)
-      if (updateError) throw updateError
-      if (existingRun && existingRun.status !== 'error') {
-        await updateRunStatus(job.runId, 'error')
-      }
-    }
+}
+
+async function releaseQueueSlot(runId: string): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
+  const { error } = await supabase
+    .from('queue_jobs')
+    .delete()
+    .like('id', `${SLOT_PREFIX}%`)
+    .eq('error', runId)
+  if (error) throw error
+}
+
+async function tryActivateJob(job: QueueJob): Promise<boolean> {
+  const slotId = await acquireQueueSlot(job)
+  if (!slotId) return false
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
+  const { data, error } = await supabase
+    .from('queue_jobs')
+    .update({ status: 'active', started_at: new Date().toISOString() })
+    .eq('id', job.id)
+    .eq('status', 'waiting')
+    .select('id')
+  if (error) {
+    await releaseQueueSlotById(slotId)
+    throw error
+  }
+  if (!data || data.length === 0) {
+    await releaseQueueSlotById(slotId)
+    return false
+  }
+  return true
+}
+
+async function cleanupOrphanedSlots(): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
+  const [slotResult, activeResult] = await Promise.all([
+    supabase.from('queue_jobs').select('id, error, created_at').like('id', `${SLOT_PREFIX}%`),
+    supabase.from('queue_jobs').select('run_id').eq('status', 'active').not('id', 'like', `${SLOT_PREFIX}%`),
+  ])
+  if (slotResult.error) throw slotResult.error
+  if (activeResult.error) throw activeResult.error
+
+  const activeRunIds = new Set((activeResult.data ?? []).map((row: Record<string, unknown>) => row.run_id as string))
+  const orphanCutoff = Date.now() - 60_000
+  const orphanedIds = (slotResult.data ?? [])
+    .filter((row: Record<string, unknown>) =>
+      !activeRunIds.has(row.error as string)
+      && new Date(row.created_at as string).getTime() < orphanCutoff
+    )
+    .map((row: Record<string, unknown>) => row.id as string)
+  if (orphanedIds.length > 0) {
+    const { error } = await supabase.from('queue_jobs').delete().in('id', orphanedIds)
+    if (error) throw error
   }
 }
 
@@ -54,28 +118,23 @@ export async function enqueue(runId: string, projectId: string, params: ExecuteP
   canStart: boolean
   queuePosition: number
 }> {
-  await recoverStaleActiveJobs()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabase = getSql() as any
   const id = `job-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
   const createdAt = new Date().toISOString()
 
-  const { count: activeCount, error: activeError } = await supabase
-    .from('queue_jobs')
-    .select('id', { count: 'exact', head: true })
-    .eq('status', 'active')
-  if (activeError) throw activeError
-  const canStart = (activeCount ?? 0) < MAX_CONCURRENT
-
   const { error: insertError } = await supabase.from('queue_jobs').insert({
     id,
     run_id: runId,
     project_id: projectId,
-    status: canStart ? 'active' : 'waiting',
+    status: 'waiting',
     params,
     created_at: createdAt,
   })
   if (insertError) throw insertError
+
+  const waitingJob: QueueJob = { id, runId, projectId, status: 'waiting', params, createdAt }
+  const canStart = await tryActivateJob(waitingJob)
 
   const { count: waitingCount, error: waitingError } = await supabase
     .from('queue_jobs')
@@ -84,7 +143,7 @@ export async function enqueue(runId: string, projectId: string, params: ExecuteP
   if (waitingError) throw waitingError
 
   return {
-    job: { id, runId, projectId, status: canStart ? 'active' : 'waiting', params, createdAt },
+    job: { ...waitingJob, status: canStart ? 'active' : 'waiting' },
     canStart,
     queuePosition: canStart ? 0 : (waitingCount ?? 0),
   }
@@ -93,12 +152,18 @@ export async function enqueue(runId: string, projectId: string, params: ExecuteP
 export async function markJobActive(runId: string): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabase = getSql() as any
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('queue_jobs')
-    .update({ status: 'active', started_at: new Date().toISOString() })
+    .select('*')
     .eq('run_id', runId)
-    .eq('status', 'waiting')
+    .limit(1)
   if (error) throw error
+  if (!data || data.length === 0) throw new Error(`Queue job ${runId} not found`)
+  const job = rowToJob(data[0])
+  if (job.status === 'active') return
+  if (job.status !== 'waiting' || !(await tryActivateJob(job))) {
+    throw new Error(`No execution slot available for ${runId}`)
+  }
 }
 
 export async function markJobDone(runId: string, status: 'completed' | 'failed', error?: string): Promise<QueueJob | undefined> {
@@ -112,29 +177,21 @@ export async function markJobDone(runId: string, status: 'completed' | 'failed',
     .select('id')
   if (updateError) throw updateError
   if (!updatedRows || updatedRows.length === 0) return undefined
-
-  const { count: activeCount, error: activeError } = await supabase
-    .from('queue_jobs')
-    .select('id', { count: 'exact', head: true })
-    .eq('status', 'active')
-  if (activeError) throw activeError
-  if ((activeCount ?? 0) >= MAX_CONCURRENT) return undefined
+  await releaseQueueSlot(runId)
 
   const { data: nextRows, error: nextError } = await supabase
     .from('queue_jobs')
     .select('*')
     .eq('status', 'waiting')
     .order('created_at', { ascending: true })
-    .limit(1)
+    .limit(MAX_CONCURRENT)
   if (nextError) throw nextError
   if (!nextRows || nextRows.length === 0) return undefined
-  const next = rowToJob(nextRows[0])
-  const { error: activateError } = await supabase
-    .from('queue_jobs')
-    .update({ status: 'active', started_at: new Date().toISOString() })
-    .eq('id', next.id)
-  if (activateError) throw activateError
-  return { ...next, status: 'active' }
+  for (const row of nextRows) {
+    const next = rowToJob(row)
+    if (await tryActivateJob(next)) return { ...next, status: 'active' }
+  }
+  return undefined
 }
 
 export async function getQueueStatus(): Promise<{
@@ -144,6 +201,7 @@ export async function getQueueStatus(): Promise<{
   recentJobs: QueueJob[]
 }> {
   await expireStaleRuns()
+  await cleanupOrphanedSlots()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabase = getSql() as any
 
@@ -153,6 +211,7 @@ export async function getQueueStatus(): Promise<{
     .from('queue_jobs')
     .select('id, started_at, created_at')
     .eq('status', 'active')
+    .not('id', 'like', `${SLOT_PREFIX}%`)
   if (staleError) throw staleError
   const staleIds = (staleActive ?? [])
     .filter((r: Record<string, unknown>) => ((r.started_at as string) ?? (r.created_at as string)) < cutoff)
@@ -164,12 +223,19 @@ export async function getQueueStatus(): Promise<{
       .update({ status: 'failed', completed_at: new Date().toISOString(), error: 'auto_expired_stale_active' })
       .in('id', staleIds)
     if (recoverError) throw recoverError
+    const { data: staleJobs, error: staleJobsError } = await supabase
+      .from('queue_jobs')
+      .select('run_id')
+      .in('id', staleIds)
+    if (staleJobsError) throw staleJobsError
+    for (const row of staleJobs ?? []) await releaseQueueSlot(row.run_id as string)
 
     const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3000'
     const { count: activeAfter, error: activeAfterError } = await supabase
       .from('queue_jobs')
       .select('id', { count: 'exact', head: true })
       .eq('status', 'active')
+      .not('id', 'like', `${SLOT_PREFIX}%`)
     if (activeAfterError) throw activeAfterError
     const slots = MAX_CONCURRENT - (activeAfter ?? 0)
     if (slots > 0) {
@@ -182,19 +248,21 @@ export async function getQueueStatus(): Promise<{
       if (waitingError) throw waitingError
       for (const row of waiting ?? []) {
         const job = rowToJob(row)
-        fetch(`${base}/api/queue/start`, {
+        if (!(await tryActivateJob(job))) continue
+        const response = await fetch(`${base}/api/queue/start`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getInternalJsonHeaders(),
           body: JSON.stringify({ runId: job.runId, params: job.params }),
-        }).catch(() => {})
+        })
+        if (!response.ok) break
       }
     }
   }
 
   const [activeResult, waitingResult, recentResult] = await Promise.all([
-    supabase.from('queue_jobs').select('id', { count: 'exact', head: true }).eq('status', 'active'),
+    supabase.from('queue_jobs').select('id', { count: 'exact', head: true }).eq('status', 'active').not('id', 'like', `${SLOT_PREFIX}%`),
     supabase.from('queue_jobs').select('id', { count: 'exact', head: true }).eq('status', 'waiting'),
-    supabase.from('queue_jobs').select('*').order('created_at', { ascending: false }).limit(50),
+    supabase.from('queue_jobs').select('*').not('id', 'like', `${SLOT_PREFIX}%`).order('created_at', { ascending: false }).limit(50),
   ])
   if (activeResult.error) throw activeResult.error
   if (waitingResult.error) throw waitingResult.error
@@ -228,6 +296,7 @@ export async function isQueueIdle(): Promise<boolean> {
     .from('queue_jobs')
     .select('id', { count: 'exact', head: true })
     .in('status', ['active', 'waiting'])
+    .not('id', 'like', `${SLOT_PREFIX}%`)
   if (error) throw error
   return (count ?? 0) === 0
 }
@@ -239,6 +308,7 @@ export async function pruneOldJobs(): Promise<void> {
     .from('queue_jobs')
     .select('id, completed_at, created_at')
     .in('status', ['completed', 'failed'])
+    .not('id', 'like', `${SLOT_PREFIX}%`)
   if (error) throw error
 
   const sorted = (data ?? []).slice().sort((a: Record<string, unknown>, b: Record<string, unknown>) => {

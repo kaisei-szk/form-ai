@@ -148,6 +148,15 @@ export interface N8nExecution {
   data?: {
     resultData?: {
       runData?: Record<string, unknown[]>
+      error?: {
+        message?: string
+        description?: string
+        name?: string
+        node?: { name?: string }
+        cause?: { message?: string; code?: string | number }
+        [key: string]: unknown
+      }
+      lastNodeExecuted?: string
     }
   }
 }

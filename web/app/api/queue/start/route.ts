@@ -4,6 +4,17 @@ import { triggerWorkflow } from '@/lib/n8n-client'
 import { updateRunStatus } from '@/lib/project-manager'
 import { markJobDone } from '@/lib/run-queue'
 import type { ExecuteParams } from '@/lib/types'
+import { getInternalJsonHeaders, requireInternalAuth } from '@/lib/internal-auth'
+
+async function startNextJob(next: Awaited<ReturnType<typeof markJobDone>>): Promise<void> {
+  if (!next) return
+  const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3000'
+  await fetch(`${base}/api/queue/start`, {
+    method: 'POST',
+    headers: getInternalJsonHeaders(),
+    body: JSON.stringify({ runId: next.runId, params: next.params }),
+  })
+}
 
 const Schema = z.object({
   runId: z.string(),
@@ -27,18 +38,22 @@ const Schema = z.object({
  * キューから次のジョブを実際にn8nで起動する（内部用）。
  */
 export async function POST(req: NextRequest) {
+  const unauthorized = requireInternalAuth(req)
+  if (unauthorized) return unauthorized
   try {
     const { runId, params } = Schema.parse(await req.json())
     const execParams = params as ExecuteParams
 
     try {
       const result = await triggerWorkflow(execParams)
-      updateRunStatus(runId, 'running', result.executionId)
+      await updateRunStatus(runId, 'running', result.executionId)
       return NextResponse.json({ success: true, executionId: result.executionId })
     } catch (triggerErr) {
       // Trigger failed — mark both run and queue job as failed
-      updateRunStatus(runId, 'error')
-      markJobDone(runId, 'failed', String(triggerErr))
+      const error = String(triggerErr)
+      await updateRunStatus(runId, 'error', undefined, undefined, { error })
+      const next = await markJobDone(runId, 'failed', error)
+      await startNextJob(next)
       return NextResponse.json({ success: false, error: String(triggerErr) }, { status: 502 })
     }
   } catch (e) {

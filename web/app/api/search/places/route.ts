@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
+import { requireInternalAuth } from '@/lib/internal-auth'
 
 export const maxDuration = 300
 
@@ -230,6 +231,8 @@ async function searchPlaces(
 }
 
 export async function POST(req: NextRequest) {
+  const unauthorized = requireInternalAuth(req)
+  if (unauthorized) return unauthorized
   try {
     const body = Schema.parse(await req.json())
     const apiKey = process.env.GOOGLE_MAPS_API_KEY

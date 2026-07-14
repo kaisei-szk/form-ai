@@ -21,16 +21,7 @@ export async function getPresets(): Promise<Preset[]> {
 export async function savePreset(name: string, searchTarget: SearchTarget): Promise<Preset> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabase = getSql() as any
-  const { data, error } = await supabase
-    .from('presets')
-    .select('id')
-    .order('created_at', { ascending: false })
-    .limit(1)
-  if (error) throw error
-  const maxId = data && data.length > 0
-    ? parseInt((data[0].id as string).replace('preset-', ''), 10) || 0
-    : 0
-  const id = `preset-${String(maxId + 1).padStart(3, '0')}`
+  const id = `preset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const createdAt = new Date().toISOString()
   const { error: insertError } = await supabase
     .from('presets')

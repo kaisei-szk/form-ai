@@ -135,6 +135,10 @@
             {
               "name": "Content-Type",
               "value": "application/json"
+            },
+            {
+              "name": "x-internal-api-key",
+              "value": "={{ $env.INTERNAL_API_SECRET }}"
             }
           ]
         },
@@ -370,6 +374,10 @@
             {
               "name": "Content-Type",
               "value": "application/json"
+            },
+            {
+              "name": "x-internal-api-key",
+              "value": "={{ $env.INTERNAL_API_SECRET }}"
             }
           ]
         },
@@ -419,6 +427,10 @@
             {
               "name": "Content-Type",
               "value": "application/json"
+            },
+            {
+              "name": "x-internal-api-key",
+              "value": "={{ $env.INTERNAL_API_SECRET }}"
             }
           ]
         },
@@ -502,6 +514,10 @@
             {
               "name": "Content-Type",
               "value": "application/json"
+            },
+            {
+              "name": "x-internal-api-key",
+              "value": "={{ $env.INTERNAL_API_SECRET }}"
             }
           ]
         },

@@ -31,6 +31,7 @@ services:
       - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
       # Web本体（Vercel）に完了通知を送るためのURL
       - WEB_CALLBACK_URL=${WEB_CALLBACK_URL}
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
       # Save execution data for debugging
       - EXECUTIONS_DATA_SAVE_ON_SUCCESS=all
       - EXECUTIONS_DATA_SAVE_ON_ERROR=all
@@ -57,10 +58,12 @@ services:
       dockerfile: Dockerfile
     container_name: form-ai-playwright
     restart: unless-stopped
-    ports:
-      - "3002:3002"
+    expose:
+      - "3002"
     environment:
       - PLAYWRIGHT_SERVICE_PORT=3002
+      - NODE_ENV=production
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
       - SENDER_NAME=${SENDER_NAME:-株式会社REMEDY}
       - SENDER_EMAIL=${SENDER_EMAIL:-}
       - SENDER_COMPANY=${SENDER_COMPANY:-株式会社REMEDY}

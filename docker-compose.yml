@@ -28,6 +28,7 @@ services:
       # Callback URL so n8n can notify the web service on completion
       # host.docker.internal:3000 = Next.js web service (Docker container or `npm run dev` on host)
       - WEB_CALLBACK_URL=http://host.docker.internal:3000
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}
       # Save execution data for debugging
       - EXECUTIONS_DATA_SAVE_ON_SUCCESS=all
       - EXECUTIONS_DATA_SAVE_ON_ERROR=all
@@ -58,6 +59,7 @@ services:
       - "3002:3002"
     environment:
       - PLAYWRIGHT_SERVICE_PORT=3002
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}
       - SENDER_NAME=${SENDER_NAME:-株式会社REMEDY}
       - SENDER_EMAIL=${SENDER_EMAIL:-}
       - SENDER_COMPANY=${SENDER_COMPANY:-株式会社REMEDY}

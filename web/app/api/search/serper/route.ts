@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { runSerperSearch } from '@/lib/serper'
+import { requireInternalAuth } from '@/lib/internal-auth'
 
 export const maxDuration = 300
 
@@ -14,6 +15,8 @@ const Schema = z.object({
 })
 
 export async function POST(req: NextRequest) {
+  const unauthorized = requireInternalAuth(req)
+  if (unauthorized) return unauthorized
   try {
     const raw = Schema.parse(await req.json())
     const effectiveKeywords = raw.keywords.length > 0

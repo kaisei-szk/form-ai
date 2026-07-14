@@ -7,6 +7,7 @@
 import { getProjects, getRunsForProject, updateRunStatus, rollupBatchRun } from './project-manager'
 import { markJobDone } from './run-queue'
 import { getExecution } from './n8n-client'
+import { getInternalJsonHeaders } from './internal-auth'
 
 /** GPT-4o-mini pricing (USD per 1M tokens) */
 const PRICING = {
@@ -21,6 +22,22 @@ export function calcCostUsd(model: string, inputTokens: number, outputTokens: nu
   return (inputTokens * price.input + outputTokens * price.output) / 1_000_000
 }
 
+function getExecutionError(exec: Awaited<ReturnType<typeof getExecution>>): string | undefined {
+  if (exec.status !== 'error') return undefined
+
+  const resultData = exec.data?.resultData
+  const error = resultData?.error
+  const parts = ['n8n_execution_failed']
+  const node = error?.node?.name ?? resultData?.lastNodeExecuted
+  const code = error?.cause?.code
+  const message = error?.message ?? error?.description ?? error?.cause?.message
+
+  if (node) parts.push(`node=${node}`)
+  if (code !== undefined) parts.push(`code=${code}`)
+  if (message) parts.push(`message=${message.replace(/\s+/g, ' ').slice(0, 1000)}`)
+  return parts.join(' | ')
+}
+
 /**
  * Sync a single run: if it's 'running' and has an n8nExecutionId,
  * check n8n and update status. Returns true if status changed.
@@ -31,6 +48,7 @@ export async function syncRun(runId: string, n8nExecutionId: string): Promise<bo
     if (!exec.finished && exec.status !== 'error') return false
 
     const finalStatus = exec.status === 'success' ? 'success' : 'error'
+    const executionError = getExecutionError(exec)
 
     // Extract token usage from n8n execution data if available
     let tokensInput: number | undefined
@@ -67,13 +85,13 @@ export async function syncRun(runId: string, n8nExecutionId: string): Promise<bo
       tokensOutput,
       estimatedCostUsd,
       completedAt: exec.stoppedAt ?? new Date().toISOString(),
+      error: executionError,
     })
 
     // Also mark the queue job as done and trigger next
-    const nextJob = await markJobDone(runId, finalStatus === 'success' ? 'completed' : 'failed')
+    const nextJob = await markJobDone(runId, finalStatus === 'success' ? 'completed' : 'failed', executionError)
     if (nextJob) {
-      // Fire the next queued job in the background
-      triggerQueuedJob(nextJob.runId, nextJob.params).catch(() => {})
+      await triggerQueuedJob(nextJob.runId, nextJob.params)
     }
 
     return true
@@ -119,9 +137,10 @@ export async function syncAllRunningJobs(): Promise<{ synced: number }> {
 /** Trigger a queued job by calling our own queue/start endpoint internally. */
 async function triggerQueuedJob(runId: string, params: import('./types').ExecuteParams): Promise<void> {
   const baseUrl = process.env.INTERNAL_BASE_URL || 'http://localhost:3000'
-  await fetch(`${baseUrl}/api/queue/start`, {
+  const response = await fetch(`${baseUrl}/api/queue/start`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getInternalJsonHeaders(),
     body: JSON.stringify({ runId, params }),
   })
+  if (!response.ok) throw new Error(`Failed to start queued job: ${response.status}`)
 }

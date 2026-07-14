@@ -5,15 +5,16 @@ import { useRouter } from 'next/navigation'
 import {
   CheckCircle2, XCircle, Clock, AlertCircle, RefreshCw,
   FolderOpen, ChevronRight, Play, Database, DollarSign, ListOrdered,
-  Search, Filter, Trash2,
+  Search, Filter, Trash2, X,
 } from 'lucide-react'
 import type { ProjectRun } from '@/lib/types'
+import { explainRunError } from '@/lib/error-explainer'
 
 interface RunWithProject extends ProjectRun {
   projectName: string
 }
 
-function StatusBadge({ status }: { status: ProjectRun['status'] }) {
+function StatusBadge({ status, onErrorClick }: { status: ProjectRun['status']; onErrorClick?: () => void }) {
   const map: Record<string, { label: string; cls: string; icon: React.ReactNode }> = {
     success:   { label: '成功', cls: 'bg-green-50 text-green-700 border-green-300', icon: <CheckCircle2 className="w-3 h-3" /> },
     completed: { label: '完了', cls: 'bg-green-50 text-green-700 border-green-300', icon: <CheckCircle2 className="w-3 h-3" /> },
@@ -23,10 +24,100 @@ function StatusBadge({ status }: { status: ProjectRun['status'] }) {
     canceled:  { label: 'キャンセル', cls: 'bg-gray-100 text-gray-600 border-gray-300', icon: <XCircle className="w-3 h-3" /> },
   }
   const s = map[status] ?? { label: status, cls: 'bg-gray-100 text-gray-600 border-gray-300', icon: null }
+  const content = <>{s.icon} {s.label}</>
+  if (status === 'error' && onErrorClick) {
+    return (
+      <button
+        type="button"
+        onClick={onErrorClick}
+        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs border hover:ring-2 hover:ring-red-100 transition-shadow ${s.cls}`}
+        aria-label="エラーの詳細を表示"
+        title="エラーの詳細"
+      >
+        {content}
+        <ChevronRight className="w-3 h-3" />
+      </button>
+    )
+  }
+  return <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs border ${s.cls}`}>{content}</span>
+}
+
+function ErrorDetailsDialog({ run, onClose }: { run: RunWithProject; onClose: () => void }) {
+  const detail = explainRunError(run.error)
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [onClose])
+
   return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs border ${s.cls}`}>
-      {s.icon} {s.label}
-    </span>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="run-error-title"
+        className="w-full max-w-lg max-h-[85vh] overflow-y-auto rounded-md bg-white shadow-xl border border-gray-200"
+      >
+        <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
+          <div className="flex items-center gap-2 min-w-0">
+            <XCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
+            <h2 id="run-error-title" className="text-sm font-semibold text-gray-900 truncate">エラー詳細</h2>
+          </div>
+          <button type="button" onClick={onClose} className="p-1 text-gray-400 hover:text-gray-700" title="閉じる">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 space-y-4">
+          <div>
+            <h3 className="text-sm font-semibold text-red-700">{detail.title}</h3>
+            <p className="text-sm text-gray-600 mt-1 leading-6">{detail.description}</p>
+          </div>
+
+          <dl className="grid grid-cols-[110px_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs border-y border-gray-200 py-3">
+            <dt className="text-gray-500">エラーコード</dt>
+            <dd className="font-mono text-red-700 break-all">{detail.code}</dd>
+            {detail.failedNode && (
+              <>
+                <dt className="text-gray-500">失敗した処理</dt>
+                <dd className="text-gray-800 break-all">{detail.failedNode}</dd>
+              </>
+            )}
+            <dt className="text-gray-500">実行 ID</dt>
+            <dd className="font-mono text-gray-700 break-all">{run.id}</dd>
+            {run.n8nExecutionId && (
+              <>
+                <dt className="text-gray-500">n8n 実行 ID</dt>
+                <dd className="font-mono text-gray-700 break-all">{run.n8nExecutionId}</dd>
+              </>
+            )}
+            <dt className="text-gray-500">発生日時</dt>
+            <dd className="text-gray-700">
+              {new Date(run.completedAt ?? run.createdAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}
+            </dd>
+          </dl>
+
+          {detail.technicalDetails && (
+            <div>
+              <h3 className="text-xs font-medium text-gray-600 mb-1.5">技術情報</h3>
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-gray-900 p-3 text-xs leading-5 text-gray-100">{detail.technicalDetails}</pre>
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end border-t border-gray-200 px-5 py-3">
+          <button type="button" onClick={onClose} className="text-xs px-3 py-1.5 border border-gray-300 rounded text-gray-700 hover:bg-gray-50">
+            閉じる
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -130,6 +221,7 @@ export default function HistoryPage() {
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
+  const [selectedErrorRun, setSelectedErrorRun] = useState<RunWithProject | null>(null)
 
   const load = async () => {
     setLoading(true)
@@ -357,7 +449,10 @@ export default function HistoryPage() {
                   <td className="px-4 py-3">
                     <div className="space-y-1">
                       <div className="flex items-center gap-1.5 flex-wrap">
-                        <StatusBadge status={run.status} />
+                        <StatusBadge
+                          status={run.status}
+                          onErrorClick={run.status === 'error' ? () => setSelectedErrorRun(run) : undefined}
+                        />
                         {run.status === 'pending' && run.queuePosition !== undefined && run.queuePosition > 0 && (
                           <span className="text-xs text-yellow-600 font-medium">
                             #{run.queuePosition}待ち
@@ -380,11 +475,6 @@ export default function HistoryPage() {
                           </button>
                         )}
                       </div>
-                      {run.status === 'error' && run.error && (
-                        <div className="text-xs text-red-500 max-w-[200px] truncate" title={run.error}>
-                          {run.error}
-                        </div>
-                      )}
                     </div>
                   </td>
 
@@ -481,6 +571,7 @@ export default function HistoryPage() {
           </table>
         </div>
       </div>
+      {selectedErrorRun && <ErrorDetailsDialog run={selectedErrorRun} onClose={() => setSelectedErrorRun(null)} />}
     </div>
   )
 }

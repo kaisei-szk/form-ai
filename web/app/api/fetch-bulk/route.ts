@@ -4,18 +4,22 @@ import * as http from 'http'
 import * as zlib from 'zlib'
 import { URL } from 'url'
 import { z } from 'zod'
+import { requireInternalAuth } from '@/lib/internal-auth'
+import { parsePublicHttpUrl } from '@/lib/url-safety'
+
+export const maxDuration = 300
 
 // Allow at most 3 concurrent fetch-bulk jobs to prevent OOM when n8n fires multiple webhooks
 const MAX_CONCURRENT_FETCHES = 3
 let _activeFetches = 0
 
 const _httpAgent  = new http.Agent({ keepAlive: true, maxSockets: 64 })
-const _httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64, rejectUnauthorized: false })
+const _httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32 })
 
 const Schema = z.object({
-  urls: z.array(z.string()).min(1),
+  urls: z.array(z.string().url()).min(1).max(500),
   timeoutMs: z.number().int().min(1000).max(30000).default(8000),
-  concurrency: z.number().int().min(1).max(100).default(30),
+  concurrency: z.number().int().min(1).max(30).default(20),
 })
 
 interface FetchResult {
@@ -45,7 +49,13 @@ function decodeBuffer(buf: Buffer, contentTypeHeader: string): string {
   try { return new TextDecoder(charsetLabel).decode(buf) } catch { return buf.toString('utf8') }
 }
 
-function fetchUrl(rawUrl: string, timeoutMs: number): Promise<FetchResult> {
+async function fetchUrl(rawUrl: string, timeoutMs: number): Promise<FetchResult> {
+  let parsedUrl: URL
+  try {
+    parsedUrl = await parsePublicHttpUrl(rawUrl)
+  } catch (error) {
+    return { url: rawUrl, html: '', error: error instanceof Error ? error.message : 'invalid_url', statusCode: null }
+  }
   return new Promise((resolve) => {
     let resolved = false
     const done = (result: FetchResult) => {
@@ -53,13 +63,6 @@ function fetchUrl(rawUrl: string, timeoutMs: number): Promise<FetchResult> {
         resolved = true
         resolve(result)
       }
-    }
-
-    let parsedUrl: URL
-    try {
-      parsedUrl = new URL(rawUrl)
-    } catch {
-      return done({ url: rawUrl, html: '', error: 'invalid_url', statusCode: null })
     }
 
     const isHttps = parsedUrl.protocol === 'https:'
@@ -155,6 +158,8 @@ async function fetchBatch(urls: string[], timeoutMs: number, concurrency: number
 }
 
 export async function POST(req: NextRequest) {
+  const unauthorized = requireInternalAuth(req)
+  if (unauthorized) return unauthorized
   if (_activeFetches >= MAX_CONCURRENT_FETCHES) {
     return NextResponse.json(
       { success: false, error: 'Server busy — too many concurrent fetch jobs. Retry in a few seconds.' },

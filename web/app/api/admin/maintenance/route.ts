@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { runMaintenance, pruneOldData } from '@/lib/db-maintenance'
 import { expireStaleRuns } from '@/lib/project-manager'
+import { requireInternalAuth } from '@/lib/internal-auth'
+import { z } from 'zod'
+
+const MaintenanceSchema = z.object({
+  prune: z.boolean().optional(),
+  daysOld: z.number().int().min(7).max(3650).optional(),
+  statuses: z.array(z.enum(['送信済み', 'スキップ'])).max(2).optional(),
+})
 
 /**
  * POST /api/admin/maintenance
@@ -11,12 +19,19 @@ import { expireStaleRuns } from '@/lib/project-manager'
  *   { prune?: boolean, daysOld?: number, statuses?: string[] }
  *
  * Called by n8n on a schedule or manually from the settings page.
- * No auth required — internal network only.
+ * Requires INTERNAL_API_SECRET via x-internal-api-key or Bearer auth.
  */
 export async function POST(req: NextRequest) {
+  const unauthorized = requireInternalAuth(req)
+  if (unauthorized) return unauthorized
   try {
-    let pruneOpts: { prune?: boolean; daysOld?: number; statuses?: string[] } = {}
-    try { pruneOpts = await req.json() } catch { /* no body or non-JSON — ignore */ }
+    let rawBody: unknown = {}
+    try { rawBody = await req.json() } catch { /* no body or non-JSON */ }
+    const parsed = MaintenanceSchema.safeParse(rawBody)
+    if (!parsed.success) {
+      return NextResponse.json({ success: false, error: parsed.error.flatten() }, { status: 400 })
+    }
+    const pruneOpts = parsed.data
 
     const staleExpired = await expireStaleRuns()
     const dbStats = await runMaintenance()
@@ -40,7 +55,9 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const unauthorized = requireInternalAuth(req)
+  if (unauthorized) return unauthorized
   try {
     const staleExpired = await expireStaleRuns()
     const dbStats = await runMaintenance()

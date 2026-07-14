@@ -3,6 +3,7 @@ import { getProjectRun, updateRunStatus, deleteRun } from '@/lib/project-manager
 import { getQueuePosition, markJobDone } from '@/lib/run-queue'
 import { removeByRunId } from '@/lib/companies-db'
 import { z } from 'zod'
+import { getInternalJsonHeaders } from '@/lib/internal-auth'
 
 export async function GET(_req: NextRequest, { params }: { params: { runId: string } }) {
   try {
@@ -27,6 +28,7 @@ const PatchSchema = z.object({
   estimatedCostUsd: z.number().optional(),
   completedAt: z.string().optional(),
   rawSearchCount: z.number().int().optional(),
+  error: z.string().optional(),
 })
 
 export async function PATCH(req: NextRequest, { params }: { params: { runId: string } }) {
@@ -38,6 +40,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { runId: str
       estimatedCostUsd: body.estimatedCostUsd,
       completedAt: body.completedAt,
       rawSearchCount: body.rawSearchCount,
+      error: body.status === 'error' ? (body.error ?? 'canceled_by_user') : undefined,
     })
 
     // When a run is manually canceled (set to 'error'), advance the queue so waiting
@@ -47,11 +50,11 @@ export async function PATCH(req: NextRequest, { params }: { params: { runId: str
       const next = await markJobDone(params.runId, 'failed', 'canceled_by_user')
       if (next) {
         const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3000'
-        fetch(`${base}/api/queue/start`, {
+        await fetch(`${base}/api/queue/start`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getInternalJsonHeaders(),
           body: JSON.stringify({ runId: next.runId, params: next.params }),
-        }).catch(() => {})
+        })
       }
     }
 

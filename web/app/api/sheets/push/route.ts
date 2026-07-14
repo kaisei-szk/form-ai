@@ -77,7 +77,7 @@ export async function POST(req: NextRequest) {
     if (!project) return NextResponse.json({ success: false, error: 'Project not found' }, { status: 404 })
     if (!project.sheetsId) return NextResponse.json({ success: false, error: 'スプレッドシート未連携' }, { status: 400 })
 
-    const auth = getAuthedClient()
+    const auth = await getAuthedClient()
     const sheets = google.sheets({ version: 'v4', auth })
     const sheetsId = project.sheetsId
 

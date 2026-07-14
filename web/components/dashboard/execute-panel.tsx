@@ -273,12 +273,29 @@ export default function ExecutePanel() {
   // Poll a single run and return its final status; updates live counters along the way
   const pollSingleRun = useCallback((runId: string): Promise<'success' | 'error'> => {
     return new Promise((resolve) => {
+      let missingCount = 0
+      let finished = false
+      const finish = (result: 'success' | 'error') => {
+        if (finished) return
+        finished = true
+        clearInterval(interval)
+        clearTimeout(timeout)
+        resolve(result)
+      }
       const interval = setInterval(async () => {
         try {
           const res = await fetch(`/api/projects/runs/${runId}`)
+          if (!res.ok) {
+            if (res.status === 404 && ++missingCount >= 3) finish('error')
+            return
+          }
           const data = await res.json()
           const run = data.data
-          if (!run) return
+          if (!run) {
+            if (++missingCount >= 3) finish('error')
+            return
+          }
+          missingCount = 0
 
           // Update live counter whenever itemsWritten changes
           if (run.itemsWritten !== undefined && run.itemsWritten > 0) {
@@ -297,17 +314,16 @@ export default function ExecutePanel() {
           }
 
           if (run.status === 'success' || run.status === 'completed') {
-            clearInterval(interval)
             setItemsWritten(run.itemsWritten ?? 0)
-            resolve('success')
+            finish('success')
           } else if (run.status === 'error') {
-            clearInterval(interval)
-            resolve('error')
+            finish('error')
           }
         } catch {
-          // continue polling
+          // Transient network failures are retried until the overall timeout.
         }
       }, 3000)
+      const timeout = setTimeout(() => finish('error'), 2 * 60 * 60 * 1000)
     })
   }, [])
 
@@ -362,8 +378,11 @@ export default function ExecutePanel() {
           }),
         })
         const data = await res.json()
-        if (!data.success) {
+        if (!res.ok || !data.success) {
           setLog(`キュー追加失敗: ${data.error}`)
+          setStatus('error')
+          setBatchProgress(null)
+          return
         } else if (data.batch && Array.isArray(data.childRunIds)) {
           // Batch mode: poll child runs; parent run tracks aggregated stats in history
           runIds.push(...data.childRunIds)
@@ -373,8 +392,16 @@ export default function ExecutePanel() {
         }
       } catch (e) {
         setLog(`エラー: ${String(e)}`)
-        runIds.push(runId)  // fallback so polling still starts
+        setStatus('error')
+        setBatchProgress(null)
+        return
       }
+    }
+
+    if (runIds.length === 0) {
+      setStatus('error')
+      setLog('実行対象をキューへ追加できませんでした')
+      return
     }
 
     const progress: BatchProgress = { total: runIds.length, done: 0, success: 0, error: 0 }

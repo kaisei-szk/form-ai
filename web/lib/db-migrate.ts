@@ -1,18 +1,18 @@
+import getSql from './db'
+
 export async function runMigrations(): Promise<void> {
-  // Tables already created in Supabase dashboard
-  // serper_jobs table SQL (run in Supabase SQL Editor):
-  //
-  // CREATE TABLE IF NOT EXISTS serper_jobs (
-  //   id           TEXT PRIMARY KEY,
-  //   status       TEXT NOT NULL DEFAULT 'queued',
-  //   params       JSONB NOT NULL DEFAULT '{}',
-  //   result_count INTEGER,
-  //   result_items JSONB,
-  //   error        TEXT,
-  //   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  //   started_at   TIMESTAMPTZ,
-  //   completed_at TIMESTAMPTZ
-  // );
-  // CREATE INDEX IF NOT EXISTS serper_jobs_status_idx ON serper_jobs(status);
-  // CREATE INDEX IF NOT EXISTS serper_jobs_created_idx ON serper_jobs(created_at DESC);
+  // Supabase's Data API cannot execute DDL. Verify that dashboard/CLI migrations
+  // have been applied instead of returning a misleading success response.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
+  const requiredTables = ['projects', 'project_runs', 'companies', 'presets', 'queue_jobs', 'app_settings']
+  const missing: string[] = []
+
+  for (const table of requiredTables) {
+    const { error } = await supabase.from(table).select('*', { count: 'exact', head: true })
+    if (error) missing.push(table)
+  }
+  if (missing.length > 0) {
+    throw new Error(`Supabase migration required for: ${missing.join(', ')}`)
+  }
 }

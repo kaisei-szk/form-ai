@@ -59,14 +59,8 @@ export async function createProject(name: string, description?: string): Promise
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabase = getSql() as any
   const today = new Date().toISOString().slice(0, 10).replace(/-/g, '')
-  const { data: existing, error: countError } = await supabase
-    .from('projects')
-    .select('id')
-    .like('id', `proj-${today}%`)
-  if (countError) throw countError
-  const seq = String((existing?.length ?? 0) + 1).padStart(3, '0')
   const project: Project = {
-    id:          `proj-${today}-${seq}`,
+    id:          `proj-${today}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     name,
     description,
     createdAt:   new Date().toISOString(),
@@ -146,14 +140,19 @@ export async function getProjectRun(runId: string): Promise<ProjectRun | undefin
 async function appendRunId(projectId: string, runId: string): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabase = getSql() as any
-  const project = await getProject(projectId)
-  if (!project) return
-  if (project.runIds.includes(runId)) return
-  const { error } = await supabase
-    .from('projects')
-    .update({ run_ids: [...project.runIds, runId] })
-    .eq('id', projectId)
-  if (error) throw error
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const project = await getProject(projectId)
+    if (!project || project.runIds.includes(runId)) return
+    const { data, error } = await supabase
+      .from('projects')
+      .update({ run_ids: [...project.runIds, runId] })
+      .eq('id', projectId)
+      .eq('run_ids', project.runIds)
+      .select('id')
+    if (error) throw error
+    if (data?.length) return
+  }
+  throw new Error(`Failed to append run ${runId} due to concurrent project updates`)
 }
 
 export async function addRunToProject(
@@ -237,7 +236,10 @@ export async function addBatchRunToProject(
       parent_run_id: parent.id,
     }))
   )
-  if (childrenError) throw childrenError
+  if (childrenError) {
+    await supabase.from('project_runs').delete().eq('id', parent.id)
+    throw childrenError
+  }
 
   await appendRunId(projectId, parent.id)
   return { parent: parentRun, children: childRuns }
@@ -255,7 +257,7 @@ export async function rollupBatchRun(parentRunId: string): Promise<void> {
     .select('*')
     .in('id', parent.childRunIds)
   if (childError) throw childError
-  const children = (childRows ?? []).map(rowToRun)
+  const children: ProjectRun[] = (childRows ?? []).map(rowToRun)
 
   const allTerminal = children.every((c: ProjectRun) => c.status === 'success' || c.status === 'completed' || c.status === 'error')
   if (!allTerminal) return
@@ -269,6 +271,10 @@ export async function rollupBatchRun(parentRunId: string): Promise<void> {
   const totalTokOut    = children.reduce((s: number, c: ProjectRun) => s + (c.tokensOutput         ?? 0), 0)
   const totalRawSearch = children.reduce((s: number, c: ProjectRun) => s + (c.rawSearchCount      ?? 0), 0)
   const hasSuccess     = children.some((c: ProjectRun) => c.status === 'success' || c.status === 'completed')
+  const childErrors    = children
+    .filter((c: ProjectRun) => c.status === 'error')
+    .map((c: ProjectRun) => c.error)
+    .filter((error): error is string => Boolean(error))
 
   const { error } = await supabase
     .from('project_runs')
@@ -280,6 +286,7 @@ export async function rollupBatchRun(parentRunId: string): Promise<void> {
       tokens_input:       totalTokIn > 0 ? totalTokIn : null,
       tokens_output:      totalTokOut > 0 ? totalTokOut : null,
       raw_search_count:   totalRawSearch > 0 ? totalRawSearch : null,
+      error:              hasSuccess ? null : (childErrors[0] ?? 'batch_all_children_failed'),
     })
     .eq('id', parentRunId)
   if (error) throw error
@@ -315,7 +322,7 @@ export async function expireStaleRuns(
 
   const { data: runningRows, error: runningError } = await supabase
     .from('project_runs')
-    .update({ status: 'error', completed_at: now.toISOString() })
+    .update({ status: 'error', completed_at: now.toISOString(), error: 'auto_expired_stale_running' })
     .eq('status', 'running')
     .lt('created_at', runningCutoff)
     .select('id')
@@ -323,7 +330,7 @@ export async function expireStaleRuns(
 
   const { data: pendingRows, error: pendingError } = await supabase
     .from('project_runs')
-    .update({ status: 'error', completed_at: now.toISOString() })
+    .update({ status: 'error', completed_at: now.toISOString(), error: 'auto_expired_stale_pending' })
     .eq('status', 'pending')
     .lt('created_at', pendingCutoff)
     .select('id')

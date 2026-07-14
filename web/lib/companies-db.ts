@@ -137,6 +137,22 @@ const ALLOWED_SORT: Record<CompanySortBy, string> = {
   formType:    'form_type',
 }
 
+const DB_PAGE_SIZE = 1000
+
+async function collectPagedRows(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  buildQuery: (from: number, to: number) => any,
+): Promise<Record<string, unknown>[]> {
+  const rows: Record<string, unknown>[] = []
+  for (let from = 0; ; from += DB_PAGE_SIZE) {
+    const { data, error } = await buildQuery(from, from + DB_PAGE_SIZE - 1)
+    if (error) throw error
+    const page = (data ?? []) as Record<string, unknown>[]
+    rows.push(...page)
+    if (page.length < DB_PAGE_SIZE) return rows
+  }
+}
+
 function applyFilters(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   query: any,
@@ -156,7 +172,8 @@ function applyFilters(
   if (filters?.hasPhone === 'true') query = query.neq('phone', '')
   if (filters?.hasEmail === 'true') query = query.neq('email', '')
   if (filters?.search) {
-    const s = filters.search.toLowerCase()
+    const s = filters.search.toLowerCase().replace(/[,()%'"\\]/g, ' ').trim()
+    if (!s) return query
     query = query.or(
       `name.ilike.%${s}%,hp_url.ilike.%${s}%,form_url.ilike.%${s}%,address.ilike.%${s}%,phone.ilike.%${s}%,email.ilike.%${s}%,notes.ilike.%${s}%`
     )
@@ -233,18 +250,21 @@ export async function countCompaniesAndFormCount(
 export async function getDistinctValues(projectId?: string): Promise<{ industries: string[]; areas: string[] }> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabase = getSupabase() as any
-  let indQuery = supabase.from('companies').select('industry').neq('industry', '').order('industry')
-  let areaQuery = supabase.from('companies').select('area').neq('area', '').order('area')
-  if (projectId) {
-    indQuery  = indQuery.eq('project_id', projectId)
-    areaQuery = areaQuery.eq('project_id', projectId)
-  }
-  const [indResult, areaResult] = await Promise.all([indQuery, areaQuery])
-  if (indResult.error) throw indResult.error
-  if (areaResult.error) throw areaResult.error
+  const [industryRows, areaRows] = await Promise.all([
+    collectPagedRows((from, to) => {
+      let query = supabase.from('companies').select('industry').neq('industry', '').order('industry')
+      if (projectId) query = query.eq('project_id', projectId)
+      return query.range(from, to)
+    }),
+    collectPagedRows((from, to) => {
+      let query = supabase.from('companies').select('area').neq('area', '').order('area')
+      if (projectId) query = query.eq('project_id', projectId)
+      return query.range(from, to)
+    }),
+  ])
 
-  const industries: string[] = [...new Set((indResult.data ?? []).map((r: Record<string, unknown>) => r.industry as string))].filter((s): s is string => Boolean(s))
-  const areas: string[]      = [...new Set((areaResult.data ?? []).map((r: Record<string, unknown>) => r.area as string))].filter((s): s is string => Boolean(s))
+  const industries: string[] = [...new Set(industryRows.map((r) => r.industry as string))].filter((s): s is string => Boolean(s))
+  const areas: string[]      = [...new Set(areaRows.map((r) => r.area as string))].filter((s): s is string => Boolean(s))
   return { industries, areas }
 }
 
@@ -259,35 +279,36 @@ export async function getCompanyStats(projectId?: string): Promise<{
 
   let totalQuery = supabase.from('companies').select('id', { count: 'exact', head: true })
   let formQuery  = supabase.from('companies').select('id', { count: 'exact', head: true }).neq('form_url', '')
-  let statusQuery    = supabase.from('companies').select('status')
-  let formTypeQuery  = supabase.from('companies').select('form_type')
-
   if (projectId) {
     totalQuery    = totalQuery.eq('project_id', projectId)
     formQuery     = formQuery.eq('project_id', projectId)
-    statusQuery   = statusQuery.eq('project_id', projectId)
-    formTypeQuery = formTypeQuery.eq('project_id', projectId)
   }
 
-  const [totalResult, formResult, statusResult, formTypeResult] = await Promise.all([
+  const [totalResult, formResult, statusRows, formTypeRows] = await Promise.all([
     totalQuery,
     formQuery,
-    statusQuery,
-    formTypeQuery,
+    collectPagedRows((from, to) => {
+      let query = supabase.from('companies').select('status')
+      if (projectId) query = query.eq('project_id', projectId)
+      return query.range(from, to)
+    }),
+    collectPagedRows((from, to) => {
+      let query = supabase.from('companies').select('form_type')
+      if (projectId) query = query.eq('project_id', projectId)
+      return query.range(from, to)
+    }),
   ])
   if (totalResult.error) throw totalResult.error
   if (formResult.error) throw formResult.error
-  if (statusResult.error) throw statusResult.error
-  if (formTypeResult.error) throw formTypeResult.error
 
   const byStatus: Record<string, number> = {}
-  for (const r of statusResult.data ?? []) {
+  for (const r of statusRows) {
     const key = (r as Record<string, unknown>).status as string || '不明'
     byStatus[key] = (byStatus[key] ?? 0) + 1
   }
 
   const byFormType: Record<string, number> = {}
-  for (const r of formTypeResult.data ?? []) {
+  for (const r of formTypeRows) {
     const key = (r as Record<string, unknown>).form_type as string || 'unknown'
     byFormType[key] = (byFormType[key] ?? 0) + 1
   }
@@ -304,14 +325,14 @@ export async function getProjectsStats(projectIds: string[]): Promise<Map<string
   if (projectIds.length === 0) return new Map()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabase = getSupabase() as any
-  const { data, error } = await supabase
+  const data = await collectPagedRows((from, to) => supabase
     .from('companies')
     .select('project_id, form_url')
     .in('project_id', projectIds)
-  if (error) throw error
+    .range(from, to))
 
   const map = new Map<string, { companyCount: number; formFoundCount: number }>()
-  for (const r of data ?? []) {
+  for (const r of data) {
     const pid = (r as Record<string, unknown>).project_id as string
     const formUrl = (r as Record<string, unknown>).form_url as string
     const existing = map.get(pid) ?? { companyCount: 0, formFoundCount: 0 }
@@ -326,23 +347,23 @@ export async function getProjectsStats(projectIds: string[]): Promise<Map<string
 export async function getFormUrls(): Promise<Set<string>> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabase = getSupabase() as any
-  const { data, error } = await supabase
+  const data = await collectPagedRows((from, to) => supabase
     .from('companies')
     .select('normalized_form_url')
     .neq('normalized_form_url', '')
-  if (error) throw error
-  return new Set((data ?? []).map((r: Record<string, unknown>) => r.normalized_form_url as string))
+    .range(from, to))
+  return new Set(data.map((r) => r.normalized_form_url as string))
 }
 
 async function getHpUrls(): Promise<Set<string>> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabase = getSupabase() as any
-  const { data, error } = await supabase
+  const data = await collectPagedRows((from, to) => supabase
     .from('companies')
     .select('normalized_hp_url')
     .neq('normalized_hp_url', '')
-  if (error) throw error
-  return new Set((data ?? []).map((r: Record<string, unknown>) => r.normalized_hp_url as string))
+    .range(from, to))
+  return new Set(data.map((r) => r.normalized_hp_url as string))
 }
 
 export async function addCompanies(rows: CompanyInput[]): Promise<{ added: number; duplicates: number; upgraded: number }> {

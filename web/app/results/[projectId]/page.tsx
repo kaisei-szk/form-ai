@@ -496,7 +496,7 @@ export default function ProjectResultsPage() {
     } finally {
       setBatchUpdating(false)
     }
-  }, [selectAllPages, selectedIds, projectId, selectedRunId, filters, debouncedSearch, meta.total, page, fetchData])
+  }, [selectAllPages, selectedIds, projectId, filters, debouncedSearch, meta.total, page, fetchData])
 
   // S key: mark selected rows as 送信済み (handy after manually sending forms)
   // X key: mark selected rows as スキップ (skip entries not suitable for outreach)

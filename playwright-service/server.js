@@ -15,6 +15,20 @@ const PORT = process.env.PLAYWRIGHT_SERVICE_PORT || 3001
 
 app.use(express.json({ limit: '10mb' }))
 
+function requireInternalAuth(req, res, next) {
+  const secret = process.env.INTERNAL_API_SECRET
+  if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(503).json({ success: false, error: 'INTERNAL_API_SECRET is not configured' })
+    }
+    return next()
+  }
+  const bearer = (req.get('authorization') || '').replace(/^Bearer\s+/i, '')
+  const provided = req.get('x-internal-api-key') || bearer
+  if (provided !== secret) return res.status(401).json({ success: false, error: 'Unauthorized' })
+  next()
+}
+
 // ヘルスチェック
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() })
@@ -42,7 +56,7 @@ app.get('/health', (_req, res) => {
  *   error: string | null
  * }
  */
-app.post('/submit-form', async (req, res) => {
+app.post('/submit-form', requireInternalAuth, async (req, res) => {
   const { formUrl, companyName, message, senderName, senderEmail, senderCompany } = req.body
 
   if (!formUrl || !message) {
@@ -75,7 +89,7 @@ app.post('/submit-form', async (req, res) => {
  * リクエスト: { url: string }
  * レスポンス: { type: 'inquiry' | 'booking' | 'unknown', reason: string }
  */
-app.post('/check-form', async (req, res) => {
+app.post('/check-form', requireInternalAuth, async (req, res) => {
   const { url } = req.body
   if (!url) return res.status(400).json({ error: 'url は必須です' })
 

@@ -23,7 +23,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, sheetsId: project.sheetsId, created: false })
     }
 
-    const auth = getAuthedClient()
+    const auth = await getAuthedClient()
     const sheets = google.sheets({ version: 'v4', auth })
     const drive  = google.drive({ version: 'v3', auth })
 
