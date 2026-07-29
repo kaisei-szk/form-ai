@@ -153,9 +153,18 @@ export type SerperResultItem = {
   area: string
 }
 
+export type SerperSearchStats = {
+  queriesUsed: number
+  directFound: number      // 直接検索で見つかった公式HP数
+  portalNames: number      // ポータルから抽出した店舗・企業名の数
+  lookupFound: number      // 店舗名の逆引き検索で見つかった公式HP数
+  subAreas: string[]       // 使用したサブエリア(駅名・町名)一覧
+  timedOut: boolean        // 時間/クエリ予算で途中終了したか
+}
+
 export const DEFAULT_SUFFIXES = ['お問い合わせ', '公式サイト', 'contact', '予約', '申込み']
 
-// ポータル・SNS・アグリゲータドメイン — serper結果から事前除外
+// ポータル・SNS・アグリゲータドメイン — 最終結果から除外(公式HPではない)
 const SKIP_DOMAINS = new Set([
   'jalan.net','tabelog.com','hotpepper.jp','ekiten.jp','townpage.ntt.co.jp',
   'navitime.co.jp','navitime.jp','mapion.co.jp','its-mo.com',
@@ -166,87 +175,364 @@ const SKIP_DOMAINS = new Set([
   'rakuten.co.jp','amazon.co.jp',
   'beauty.hotpepper.jp','minimo.io','hairbook.jp','riyou.jp',
   'epark.jp','homemate-research.com','zehitomo.com','baseconnect.in',
+  // ポータル逆引きの発見源にも使うディレクトリ系(結果には含めない)
+  'itp.ne.jp','caloo.jp','byoinnavi.jp','fdoc.jp','hospita.jp','qlife.jp',
+  'ozmall.co.jp','beauty.rakuten.co.jp','haisha-yoyaku.jp','eparkdentist.com',
+  'oshiete.goo.ne.jp','chiebukuro.yahoo.co.jp','note.com','ameblo.jp',
+  'prtimes.jp','mynavi.jp','townwork.net','baitoru.com','hatarako.net',
 ])
+
+// 店舗・企業名の「発見源」として使うディレクトリ型ポータル。
+// どの業種・地域でも通用する汎用リスト(業種特化のものは検索結果が空になるだけでコスト僅少)
+const PORTAL_DIRECTORY_HOSTS = [
+  'itp.ne.jp',            // iタウンページ — 全業種を網羅する電話帳
+  'ekiten.jp',            // エキテン — 全業種の店舗ポータル
+  'beauty.hotpepper.jp',  // 美容室・サロン・エステ
+  'hotpepper.jp',         // 飲食
+  'epark.jp',             // 医療・美容・リラク
+  'caloo.jp',             // 病院・クリニック口コミ
+  'byoinnavi.jp',         // 病院なび
+  'tabelog.com',          // 飲食
+  'homemate-research.com',// 施設全般
+  'ozmall.co.jp',         // 美容・サロン予約
+  'beauty.rakuten.co.jp', // 楽天ビューティー
+]
+
+// ポータルのタイトルからブランド名部分を除去するためのパターン
+const PORTAL_BRAND_RE = /ホットペッパー|hot\s*pepper|エキテン|ekiten|EPARK|イーパーク|食べログ|tabelog|caloo|カルー|病院なび|びょういんなび|タウンページ|ozmall|オズモール|minimo|ミニモ|楽天ビューティ|rakuten|ホームメイト|homemate|navitime|ナビタイム|口コミ|ネット受付|ネット予約|WEB予約|求人/i
+// 店舗名として不適切な文字列(一覧・特集ページのタイトル等)
+const NAME_REJECT_RE = /一覧|ランキング|おすすめ|オススメ|まとめ|比較|特集|検索|人気|徹底|ガイド|とは|方法|求人|募集|アクセス|地図|マップ|近く|周辺|エリア|\d+[件選店院]|ベスト\d+|TOP\d+|top\d+/i
 
 function extractHost(url: string): string {
   const m = url.match(/^https?:\/\/([^/?#]+)/)
   return m ? m[1].replace(/^www\./, '') : ''
 }
 
+function isSkipHost(host: string): boolean {
+  return SKIP_DOMAINS.has(host) || [...SKIP_DOMAINS].some((d) => host.endsWith('.' + d))
+}
+
+function isPortalHost(host: string): boolean {
+  return PORTAL_DIRECTORY_HOSTS.some((d) => host === d || host.endsWith('.' + d))
+}
+
+/**
+ * ポータル検索結果のタイトルから店舗・企業名を抽出する。
+ * 例: 「ヘアサロン○○(渋谷)|ホットペッパービューティー」→「ヘアサロン○○」
+ *     「○○クリニック(東京都渋谷区) - 口コミ・評判 | Caloo」→「○○クリニック」
+ */
+export function extractBusinessName(title: string): string | null {
+  if (!title) return null
+  // 【公式】【予約可】等の装飾を除去
+  const stripped = title.replace(/【[^】]*】/g, ' ').trim()
+  // 区切り文字で分割し、ポータルブランド名を含まない最初のセグメントを採用
+  const parts = stripped
+    .split(/[|｜]|(?:\s+[-–—−]\s+)|(?:\s+\/\s+)|(?:\s+･\s+)/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  let cand = parts.find((p) => !PORTAL_BRAND_RE.test(p)) ?? ''
+  // 末尾の (渋谷) (東京都渋谷区) 等の括弧書きを除去
+  cand = cand.replace(/[（(][^）)]*[）)]\s*$/, '').trim()
+  // 先頭括弧のみ残った断片も除去
+  cand = cand.replace(/^[（(][^）)]*[）)]\s*/, '').trim()
+  if (cand.length < 3 || cand.length > 40) return null
+  if (NAME_REJECT_RE.test(cand)) return null
+  if (PORTAL_BRAND_RE.test(cand)) return null
+  return cand
+}
+
+/** 店舗名の照合用正規化(空白・記号を除去) */
+function normalizeName(s: string): string {
+  return s.replace(/[\s　・･'"「」『』〈〉《》]/g, '').toLowerCase()
+}
+
+// ── サブエリア(駅名・町名)のAI展開 ─────────────────────────────
+// 市区町村より細かい粒度にクエリを分割することで、Google検索の
+// 「1クエリあたり実質数十件」の上限を突破する。どのエリアでも
+// GPTがその場で駅名・町名を生成するため、地域特化の辞書は不要。
+const _subAreaCache = new Map<string, string[]>()
+
+export async function aiExpandSubAreas(area: string, maxSubAreas = 12): Promise<string[]> {
+  const cached = _subAreaCache.get(area)
+  if (cached) return cached
+
+  const apiKey = process.env.OPENAI_API_KEY
+  if (!apiKey) return []
+
+  try {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        temperature: 0.1,
+        max_tokens: 300,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: '日本の地理に詳しいアシスタントです。JSONのみ返してください。' },
+          {
+            role: 'user',
+            content: `「${area}」(日本)の中にある主要な駅名・町名・エリア名を最大${maxSubAreas}個挙げてください。
+【ルール】
+1. 必ず「${area}」の内部にある地名のみ(隣接エリアはNG)
+2. Google検索の地名として使える短い名称のみ(「駅」は付けない。例: 恵比寿、代官山)
+3. 店舗が多い順に並べる
+4. 該当がない小さな自治体の場合は空配列でよい
+JSON: {"subareas": ["..."]}`,
+          },
+        ],
+      }),
+    })
+    if (!res.ok) return []
+    const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> }
+    const parsed = JSON.parse(data.choices?.[0]?.message?.content ?? '{}') as { subareas?: unknown }
+    if (!Array.isArray(parsed.subareas)) return []
+    const subs = parsed.subareas
+      .filter((s): s is string => typeof s === 'string')
+      .map((s) => s.trim())
+      .filter((s) => s.length >= 2 && s.length <= 15 && s !== area)
+      .slice(0, maxSubAreas)
+    _subAreaCache.set(area, subs)
+    return subs
+  } catch {
+    return []
+  }
+}
+
+// ── 検索本体 ───────────────────────────────────────────────
+const CONCURRENCY = 12
+const DEFAULT_MAX_QUERIES = 2200
+const DEFAULT_TIME_BUDGET_MS = 240_000  // Vercel maxDuration=300s に対し余裕を持たせる
+const TARGET_NAMES = 1500               // ポータルから抽出する店舗名の目標数
+
+type SearchCtx = {
+  apiKey: string
+  maxQueries: number
+  deadline: number
+  queriesUsed: number
+  consecutiveErrors: number
+  lastError: { status: number; text: string } | null
+  aborted: boolean
+  seenUrls: Set<string>
+  seenHosts: Set<string>
+  results: SerperResultItem[]
+  // 店舗名 → 発見時のキーワード/サブエリア
+  names: Map<string, { kw: string; subArea: string }>
+  stats: { directFound: number; lookupFound: number }
+}
+
+function budgetLeft(ctx: SearchCtx): boolean {
+  return !ctx.aborted && ctx.queriesUsed < ctx.maxQueries && Date.now() < ctx.deadline
+}
+
+/** Serper 1リクエスト。429/一時エラーは1回リトライ。連続エラーが続いたら全体を中断 */
+async function serperFetch(ctx: SearchCtx, q: string, page: number): Promise<SerperItem[] | null> {
+  if (!budgetLeft(ctx)) return null
+  ctx.queriesUsed++
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch('https://google.serper.dev/search', {
+        method: 'POST',
+        headers: { 'X-API-KEY': ctx.apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ q, gl: 'jp', hl: 'ja', num: 10, page }),
+      })
+      if (res.status === 429) {
+        await new Promise((r) => setTimeout(r, 1200))
+        continue
+      }
+      if (!res.ok) {
+        ctx.lastError = { status: res.status, text: await res.text() }
+        ctx.consecutiveErrors++
+        if (ctx.consecutiveErrors >= 5) ctx.aborted = true
+        return null
+      }
+      const data = await res.json() as { error?: string; organic?: SerperItem[] }
+      ctx.consecutiveErrors = 0
+      if (data.error) return []
+      return data.organic ?? []
+    } catch (e) {
+      ctx.lastError = { status: 0, text: String(e) }
+      ctx.consecutiveErrors++
+      if (ctx.consecutiveErrors >= 5) { ctx.aborted = true; return null }
+      await new Promise((r) => setTimeout(r, 800))
+    }
+  }
+  return null
+}
+
+/** 検索結果1件を取り込む。公式HP候補なら結果に追加、ポータルなら店舗名を収穫。戻り値=新規獲得数 */
+function ingestItem(ctx: SearchCtx, item: SerperItem, kw: string, subArea: string): number {
+  if (!item.link || ctx.seenUrls.has(item.link)) return 0
+  ctx.seenUrls.add(item.link)
+  const host = extractHost(item.link)
+  if (!host) return 0
+
+  if (isPortalHost(host)) {
+    // ポータル → 店舗名を抽出して逆引き対象に(結果には含めない)
+    const name = extractBusinessName(item.title || '')
+    if (name && !ctx.names.has(name)) {
+      ctx.names.set(name, { kw, subArea })
+      return 1
+    }
+    return 0
+  }
+  if (isSkipHost(host)) return 0
+  if (ctx.seenHosts.has(host)) return 0
+
+  ctx.seenHosts.add(host)
+  ctx.results.push({
+    link: item.link, title: item.title || '', snippet: item.snippet || '',
+    keyword: kw, area: subArea,
+  })
+  ctx.stats.directFound++
+  return 1
+}
+
+type QueryChain = { query: string; kw: string; subArea: string; maxPages: number }
+
+/** 1クエリを新規獲得が止まるまでページ送り(早期打ち切りでAPI予算を節約) */
+async function runChain(ctx: SearchCtx, chain: QueryChain): Promise<void> {
+  for (let page = 1; page <= chain.maxPages; page++) {
+    if (!budgetLeft(ctx)) return
+    const items = await serperFetch(ctx, chain.query, page)
+    if (items === null || items.length === 0) return
+    let gained = 0
+    for (const item of items) gained += ingestItem(ctx, item, chain.kw, chain.subArea)
+    // このページで新規(公式HP or 店舗名)がゼロなら以降のページも重複ばかり → 打ち切り
+    if (gained === 0) return
+  }
+}
+
+/** シンプルな並列プール */
+async function runPool<T>(jobs: T[], worker: (job: T) => Promise<void>, stop: () => boolean): Promise<void> {
+  let i = 0
+  const runners = Array.from({ length: Math.min(CONCURRENCY, jobs.length) }, async () => {
+    while (i < jobs.length && !stop()) {
+      const job = jobs[i++]
+      await worker(job)
+    }
+  })
+  await Promise.all(runners)
+}
+
+/**
+ * 多段階Serper検索:
+ *  Stage 1: エリアをAIで駅名・町名に細分化(汎用)
+ *  Stage 2: キーワード×サブエリア×サフィックスの直接検索(新規が出なくなったページで打ち切り)
+ *  Stage 3: ポータルサイト(タウンページ・ホットペッパー等)から店舗名を列挙
+ *  Stage 4: 店舗名ごとに「店舗名 エリア」で逆引き検索して公式HPを特定
+ * ポータルは地域の店舗をほぼ網羅しているため、Google検索単体の
+ * 「上位数十件しか取れない」限界を超えて母集団を確保できる。
+ */
 export async function runSerperSearch(params: {
   keywords: string[]
   area: string
   suffixes?: string[]
   keywordMode?: 'or' | 'and'
   apiKey: string
-}): Promise<{ items: SerperResultItem[]; error?: { status: number; text: string } }> {
+  maxQueries?: number
+  timeBudgetMs?: number
+}): Promise<{ items: SerperResultItem[]; stats: SerperSearchStats; error?: { status: number; text: string } }> {
   const { keywords, area, suffixes, keywordMode, apiKey } = params
-  // エリア展開はUI/n8nのバッチ分割に委譲。ここでは単一エリアとして扱う
-  const subAreas = [area]
-  const pages = 10
   const SUFFIXES = (suffixes && suffixes.length > 0) ? suffixes : DEFAULT_SUFFIXES
-  // 'and' モードは全キーワードを1つのクエリに結合して絞り込み検索にする（例: "飲食店 ラーメン"）
-  // 'or'（デフォルト）はキーワードごとに独立検索して結果を合算する（同義語での網羅向け）
   const keywordGroups = (keywordMode === 'and' && keywords.length > 0) ? [keywords.join(' ')] : keywords
 
-  type QueryJob = { query: string; kw: string; subArea: string; page: number }
-  const jobs: QueryJob[] = []
+  const ctx: SearchCtx = {
+    apiKey,
+    maxQueries: params.maxQueries ?? DEFAULT_MAX_QUERIES,
+    deadline: Date.now() + (params.timeBudgetMs ?? DEFAULT_TIME_BUDGET_MS),
+    queriesUsed: 0,
+    consecutiveErrors: 0,
+    lastError: null,
+    aborted: false,
+    seenUrls: new Set(),
+    seenHosts: new Set(),
+    results: [],
+    names: new Map(),
+    stats: { directFound: 0, lookupFound: 0 },
+  }
+  const stop = () => !budgetLeft(ctx)
+
+  // ── Stage 1: サブエリア展開 ──
+  const subAreas = await aiExpandSubAreas(area)
+  const allAreas = [area, ...subAreas]
+
+  // ── Stage 2: 直接検索 ──
+  // サブエリアがある場合はページ数を抑え、クエリの多様性に予算を回す
+  const directPages = allAreas.length > 1 ? 4 : 10
+  const directChains: QueryChain[] = []
   for (const kw of keywordGroups) {
-    for (const subArea of subAreas) {
+    for (const subArea of allAreas) {
       for (const suffix of SUFFIXES) {
-        const query = suffix ? `${kw} ${subArea} ${suffix}` : `${kw} ${subArea}`
-        for (let p = 0; p < pages; p++) {
-          jobs.push({ query, kw, subArea, page: p + 1 })
+        directChains.push({
+          query: suffix ? `${kw} ${subArea} ${suffix}` : `${kw} ${subArea}`,
+          kw, subArea, maxPages: directPages,
+        })
+      }
+    }
+  }
+  await runPool(directChains, (c) => runChain(ctx, c), stop)
+
+  // ── Stage 3: ポータル列挙(店舗名の収穫) ──
+  // まずエリア全体で各ポータルを深掘り。名前が足りなければサブエリア単位でも実行
+  const portalChainsWide: QueryChain[] = []
+  for (const portal of PORTAL_DIRECTORY_HOSTS) {
+    for (const kw of keywordGroups) {
+      portalChainsWide.push({ query: `site:${portal} ${kw} ${area}`, kw, subArea: area, maxPages: 10 })
+    }
+  }
+  await runPool(portalChainsWide, (c) => runChain(ctx, c), stop)
+
+  if (ctx.names.size < TARGET_NAMES && subAreas.length > 0 && budgetLeft(ctx)) {
+    const portalChainsNarrow: QueryChain[] = []
+    for (const portal of PORTAL_DIRECTORY_HOSTS) {
+      for (const kw of keywordGroups) {
+        for (const subArea of subAreas) {
+          portalChainsNarrow.push({ query: `site:${portal} ${kw} ${subArea}`, kw, subArea, maxPages: 3 })
         }
       }
     }
+    await runPool(portalChainsNarrow, (c) => runChain(ctx, c), () => stop() || ctx.names.size >= TARGET_NAMES)
   }
 
-  const CONCURRENCY = 5
-  const seenUrls = new Set<string>()
-  const seenHosts = new Set<string>()
-  const rawResults: SerperResultItem[] = []
-  let hasApiError: { status: number; text: string } | null = null
-
-  for (let i = 0; i < jobs.length; i += CONCURRENCY) {
-    const batch = jobs.slice(i, i + CONCURRENCY)
-    const results = await Promise.all(batch.map(async ({ query, kw, subArea, page }) => {
-      const res = await fetch('https://google.serper.dev/search', {
-        method: 'POST',
-        headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ q: query, gl: 'jp', hl: 'ja', num: 10, page }),
+  // ── Stage 4: 店舗名の逆引き検索 → 公式HP特定 ──
+  const lookupJobs = [...ctx.names.entries()]
+  await runPool(lookupJobs, async ([name, meta]) => {
+    if (!budgetLeft(ctx)) return
+    const q = `${name} ${meta.subArea}`
+    const items = await serperFetch(ctx, q, 1)
+    if (!items) return
+    const nameNorm = normalizeName(name)
+    const namePrefix = nameNorm.slice(0, Math.min(5, nameNorm.length))
+    for (const item of items) {
+      if (!item.link) continue
+      const host = extractHost(item.link)
+      if (!host || isSkipHost(host) || isPortalHost(host) || ctx.seenHosts.has(host)) continue
+      // タイトルに店舗名(先頭部分)が含まれることを要求 — 無関係サイトの誤登録を防ぐ
+      const titleNorm = normalizeName(item.title || '')
+      if (namePrefix && !titleNorm.includes(namePrefix)) continue
+      ctx.seenHosts.add(host)
+      ctx.seenUrls.add(item.link)
+      ctx.results.push({
+        link: item.link, title: item.title || '', snippet: item.snippet || '',
+        keyword: meta.kw, area: meta.subArea,
       })
-      if (!res.ok) {
-        const text = await res.text()
-        return { error: { status: res.status, text } }
-      }
-      const data = await res.json() as { error?: string; organic?: SerperItem[] }
-      if (data.error) return { items: [] as SerperResultItem[] }
-      return {
-        items: (data.organic ?? []).map(item => ({
-          link: item.link || '', title: item.title || '', snippet: item.snippet || '', keyword: kw, area: subArea,
-        })),
-      }
-    }))
-
-    for (const r of results) {
-      if ('error' in r && r.error) { hasApiError = r.error; break }
-      for (const item of (r as { items: SerperResultItem[] }).items ?? []) {
-        if (!item.link) continue
-        if (seenUrls.has(item.link)) continue
-        const host = extractHost(item.link)
-        if (!host) continue
-        if (SKIP_DOMAINS.has(host) || [...SKIP_DOMAINS].some(d => host.endsWith('.' + d))) continue
-        if (seenHosts.has(host)) continue
-        seenUrls.add(item.link)
-        seenHosts.add(host)
-        rawResults.push(item)
-      }
+      ctx.stats.lookupFound++
+      break
     }
-    if (hasApiError) break
-    if (i + CONCURRENCY < jobs.length) await new Promise((r) => setTimeout(r, 1100))
+  }, stop)
+
+  const stats: SerperSearchStats = {
+    queriesUsed: ctx.queriesUsed,
+    directFound: ctx.stats.directFound,
+    portalNames: ctx.names.size,
+    lookupFound: ctx.stats.lookupFound,
+    subAreas,
+    timedOut: !budgetLeft(ctx) && !ctx.aborted,
   }
 
-  if (hasApiError) return { items: rawResults, error: hasApiError }
-  return { items: rawResults }
+  if (ctx.aborted && ctx.lastError) {
+    return { items: ctx.results, stats, error: ctx.lastError }
+  }
+  return { items: ctx.results, stats }
 }

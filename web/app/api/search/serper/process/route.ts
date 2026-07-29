@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
     await supabase.from('serper_jobs').update({ status: 'running', started_at: new Date().toISOString() }).eq('id', jobId)
 
     const params = job.params as { keywords: string[]; area: string; suffixes?: string[]; keywordMode?: 'or' | 'and' }
-    const { items, error: apiErr } = await runSerperSearch({
+    const { items, stats, error: apiErr } = await runSerperSearch({
       keywords: params.keywords,
       area: params.area,
       suffixes: params.suffixes,
@@ -51,10 +51,12 @@ export async function POST(req: NextRequest) {
       status: 'done',
       result_count: items.length,
       result_items: items,
+      // 段階別の内訳(直接検索/ポータル逆引き/使用クエリ数)をparamsに残してSupabaseから追跡可能に
+      params: { ...(job.params as object), stats },
       completed_at: new Date().toISOString(),
     }).eq('id', jobId)
 
-    return NextResponse.json({ success: true, count: items.length })
+    return NextResponse.json({ success: true, count: items.length, stats })
   } catch (e) {
     if (jobId) {
       try {

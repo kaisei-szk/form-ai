@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'SERPER_API_KEY not configured' }, { status: 500 })
     }
 
-    const { items, error: apiErr } = await runSerperSearch({
+    const { items, stats, error: apiErr } = await runSerperSearch({
       keywords: body.keywords,
       area: body.area,
       suffixes: body.suffixes,
@@ -41,7 +41,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: `Serper API error: ${apiErr.status} ${apiErr.text}` }, { status: 502 })
     }
 
-    return NextResponse.json({ success: true, items, count: items.length })
+    return NextResponse.json({ success: true, items, count: items.length, stats })
   } catch (e) {
     return NextResponse.json({ success: false, error: String(e) }, { status: 400 })
   }
