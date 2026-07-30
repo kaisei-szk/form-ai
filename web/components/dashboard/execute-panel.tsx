@@ -108,8 +108,10 @@ export default function ExecutePanel() {
   const [keywordMode, setKeywordMode] = useState<KeywordMode>('or')
   const presetDropdownRef = useRef<HTMLDivElement>(null)
 
-  // AI keyword generation
+  // Keywords: user-entered terms drive the search. AI suggestions are opt-in
+  // (click-to-add) so the search intent never drifts from what the user typed.
   const [keywords, setKeywords] = useState<string[]>([])
+  const [aiKeywordSuggestions, setAiKeywordSuggestions] = useState<string[]>([])
   const [suffixes, setSuffixes] = useState<string[]>([])
   const [keywordsLoading, setKeywordsLoading] = useState(false)
   const [kwInput, setKwInput] = useState('')
@@ -177,10 +179,13 @@ export default function ExecutePanel() {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  // Fetch AI keyword suggestions whenever the industry or area changes (debounced 600ms)
+  // Fetch AI keyword suggestions whenever the industry or area changes (debounced 600ms).
+  // Suggestions are NOT auto-applied — the search runs with exactly the keywords the
+  // user entered; AI candidates are shown as click-to-add chips only.
   useEffect(() => {
     if (!actualIndustry) return
     setKeywords([actualIndustry])
+    setAiKeywordSuggestions([])
     setSuffixes([])
     setKeywordsLoading(true)
     const t = setTimeout(async () => {
@@ -192,8 +197,10 @@ export default function ExecutePanel() {
         })
         const data = await res.json()
         if (data.success) {
-          if (Array.isArray(data.keywords) && data.keywords.length > 0) {
-            setKeywords(data.keywords)
+          if (Array.isArray(data.keywords)) {
+            setAiKeywordSuggestions(
+              data.keywords.filter((k: unknown): k is string => typeof k === 'string' && k !== actualIndustry)
+            )
           }
           if (Array.isArray(data.suffixes)) {
             setSuffixes(data.suffixes)
@@ -695,7 +702,7 @@ export default function ExecutePanel() {
               </button>
             </div>
             {keywordsLoading
-              ? <span className="text-xs text-blue-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" />AI生成中...</span>
+              ? <span className="text-xs text-blue-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" />AI候補を生成中...</span>
               : <span className="text-xs text-gray-400">{keywords.length}個</span>
             }
           </div>
@@ -734,7 +741,25 @@ export default function ExecutePanel() {
             />
           )}
         </div>
-        <p className="text-xs text-gray-400 mt-0.5">業種・エリア変更で自動再生成 · Enterで追加 · ×で削除</p>
+        {!isRunning && aiKeywordSuggestions.filter((s) => !keywords.includes(s)).length > 0 && (
+          <div className="flex flex-wrap items-center gap-1 mt-1">
+            <span className="text-xs text-gray-400 flex items-center gap-0.5">
+              <Sparkles className="w-3 h-3" />
+              AI候補(クリックで追加):
+            </span>
+            {aiKeywordSuggestions.filter((s) => !keywords.includes(s)).map((kw) => (
+              <button
+                key={kw}
+                type="button"
+                onClick={() => setKeywords((prev) => prev.includes(kw) ? prev : [...prev, kw])}
+                className="inline-flex items-center gap-0.5 text-xs px-2 py-0.5 rounded border border-dashed border-gray-300 text-gray-500 hover:border-blue-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+              >
+                + {kw}
+              </button>
+            ))}
+          </div>
+        )}
+        <p className="text-xs text-gray-400 mt-0.5">入力したキーワードのみで検索します · Enterで追加 · ×で削除</p>
         {suffixes.length > 0 && (
           <p className="text-xs text-orange-500 mt-0.5 flex items-center gap-1">
             <Sparkles className="w-3 h-3" />
