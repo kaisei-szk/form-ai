@@ -1,5 +1,3 @@
-version: '3.8'
-
 # ===============================================
 # フォーム営業文章送信AI - 全サービス一括起動
 # 起動: docker compose up -d
@@ -26,8 +24,9 @@ services:
       - N8N_VARIABLES_INCLUDE_IN_PAYLOAD=true
       - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
       # Callback URL so n8n can notify the web service on completion
-      # host.docker.internal:3003 = Next.js dev server running on host machine
-      - WEB_CALLBACK_URL=https://web-liard-iota-37.vercel.app
+      # 同一Compose内ではwebサービスへ接続。ホストでnpm run devする場合は
+      # WEB_CALLBACK_URL=http://host.docker.internal:3000 で上書きする。
+      - WEB_CALLBACK_URL=${WEB_CALLBACK_URL:-http://web:3000}
       # Save execution data for debugging
       - EXECUTIONS_DATA_SAVE_ON_SUCCESS=all
       - EXECUTIONS_DATA_SAVE_ON_ERROR=all
@@ -36,8 +35,6 @@ services:
       - N8N_RUNNERS_ENABLED=false
       # HTTP Request node timeout (default 10s is too short for bulk search)
       - HTTP_TIMEOUT_MS=600000
-      # Expose n8n via tunnel so Vercel can reach it
-      - N8N_TUNNEL_ENABLE=true
     env_file:
       - .env
     volumes:

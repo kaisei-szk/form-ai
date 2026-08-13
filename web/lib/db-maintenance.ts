@@ -12,20 +12,20 @@ export interface PruneOptions {
 }
 
 export async function pruneOldData(opts: PruneOptions = {}): Promise<number> {
-  const sql = getSql()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
   const daysOld = opts.daysOld ?? 90
   const statuses = opts.statuses ?? ['送信済み', 'スキップ']
   const cutoff = new Date()
   cutoff.setDate(cutoff.getDate() - daysOld)
   const cutoffIso = cutoff.toISOString()
 
-  let result
-  if (statuses.length === 0) {
-    result = await sql`DELETE FROM companies WHERE collected_at < ${cutoffIso}`
-  } else {
-    result = await sql`DELETE FROM companies WHERE collected_at < ${cutoffIso} AND status = ANY(${statuses})`
-  }
-  return result.count
+  let query = supabase.from('companies').delete().lt('collected_at', cutoffIso).select('id')
+  if (statuses.length > 0) query = query.in('status', statuses)
+
+  const { data, error } = await query
+  if (error) throw error
+  return data?.length ?? 0
 }
 
 export async function runMaintenance(): Promise<MaintenanceResult> {

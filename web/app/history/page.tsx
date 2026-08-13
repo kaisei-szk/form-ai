@@ -135,13 +135,34 @@ export default function HistoryPage() {
     setLoading(true)
     setError('')
     try {
-      await fetch('/api/projects/runs/sync', { method: 'POST' }).catch(() => {})
+      // Status sync can involve n8n network calls. Do not block the visible
+      // history list while waiting for it.
+      const syncRequest = fetch('/api/projects/runs/sync', { method: 'POST' })
+        .then((res) => res.json())
+        .catch(() => null)
+
       const res = await fetch('/api/projects/runs')
       const data = await res.json()
-      if (data.success) setRuns([...data.data].sort((a: RunWithProject, b: RunWithProject) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()))
-      else setError(data.error || '取得失敗')
+      if (data.success && Array.isArray(data.data)) {
+        setRuns([...data.data].sort((a: RunWithProject, b: RunWithProject) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()))
+      } else {
+        setError(data.error || '実行履歴の取得に失敗しました')
+      }
+
+      void syncRequest.then(async (syncResult) => {
+        if (!syncResult?.success || syncResult.synced < 1) return
+        try {
+          const refreshed = await fetch('/api/projects/runs')
+          const refreshedData = await refreshed.json()
+          if (refreshedData.success && Array.isArray(refreshedData.data)) {
+            setRuns([...refreshedData.data].sort((a: RunWithProject, b: RunWithProject) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()))
+          }
+        } catch {
+          // The already rendered history remains usable.
+        }
+      })
     } catch (e) {
-      setError(String(e))
+      setError(e instanceof Error ? e.message : '実行履歴の取得に失敗しました')
     } finally {
       setLoading(false)
     }
@@ -152,7 +173,7 @@ export default function HistoryPage() {
       await fetch(`/api/projects/runs/${runId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'error' }),
+        body: JSON.stringify({ status: 'error', error: 'ユーザーによりキャンセルされました' }),
       })
       await load()
     } catch {
@@ -175,7 +196,7 @@ export default function HistoryPage() {
     try {
       const newRunId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
       const st = run.searchTarget
-      await fetch('/api/queue/execute', {
+      const response = await fetch('/api/queue/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -187,6 +208,7 @@ export default function HistoryPage() {
           // Pass individual areas array when available (enables exact multi-area reproduction)
           ...(st?.areas && st.areas.length > 1 ? { areas: st.areas } : {}),
           keywords: st?.keywords ?? [],
+          searchProvider: st?.searchProvider ?? 'serper',
           maxResults: st?.maxResults ?? 50,
           // Preserve radius mode parameters if the original run used them
           ...(st?.searchMode === 'radius' && {
@@ -197,9 +219,13 @@ export default function HistoryPage() {
           }),
         }),
       })
+      const result = await response.json().catch(() => null)
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.error || `再実行に失敗しました (${response.status})`)
+      }
       await load()
-    } catch {
-      // silently ignore
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '再実行に失敗しました')
     }
   }
 
@@ -223,7 +249,9 @@ export default function HistoryPage() {
     })
   }, [runs, search, statusFilter])
 
-  const runningCount = runs.filter((r) => r.status === 'running' || r.status === 'pending').length
+  const runningCount = runs.filter((r) => r.status === 'running').length
+  const pendingCount = runs.filter((r) => r.status === 'pending').length
+  const activeCount = runningCount + pendingCount
 
   return (
     <div className="p-6 space-y-4 h-full flex flex-col">
@@ -232,9 +260,12 @@ export default function HistoryPage() {
           <h1 className="text-lg font-semibold text-gray-900">実行履歴</h1>
           <p className="text-sm text-gray-500 mt-1">
             {loading ? '読み込み中...' : `${filteredRuns.length} / ${runs.length}件`}
-            {runningCount > 0 && (
+            {activeCount > 0 && (
               <span className="ml-2 inline-flex items-center gap-1 text-xs text-blue-600">
-                <RefreshCw className="w-3 h-3 animate-spin" />{runningCount}件実行中
+                <RefreshCw className="w-3 h-3 animate-spin" />
+                {runningCount > 0 && `${runningCount}件実行中`}
+                {runningCount > 0 && pendingCount > 0 && '・'}
+                {pendingCount > 0 && `${pendingCount}件待機中`}
               </span>
             )}
           </p>

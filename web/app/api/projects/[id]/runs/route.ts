@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getRunsForProject, addRunToProject } from '@/lib/project-manager'
+import { getErrorMessage } from '@/lib/error-message'
 import { z } from 'zod'
 
 export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
@@ -7,7 +8,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     const runs = (await getRunsForProject(params.id)).filter((r) => !r.parentRunId)
     return NextResponse.json({ success: true, data: runs })
   } catch (e) {
-    return NextResponse.json({ success: false, error: String(e) }, { status: 500 })
+    return NextResponse.json({ success: false, error: getErrorMessage(e) }, { status: 500 })
   }
 }
 
@@ -28,6 +29,6 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     const run = await addRunToProject(params.id, body)
     return NextResponse.json({ success: true, data: run })
   } catch (e) {
-    return NextResponse.json({ success: false, error: String(e) }, { status: 400 })
+    return NextResponse.json({ success: false, error: getErrorMessage(e) }, { status: 400 })
   }
 }

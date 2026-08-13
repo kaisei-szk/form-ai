@@ -12,7 +12,7 @@ const SCOPES = [
 ]
 
 function getRedirectUri() {
-  const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3003'
+  const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3000'
   return `${base}/api/google/callback`
 }
 
