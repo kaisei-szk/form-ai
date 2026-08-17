@@ -3,8 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Play, Loader2, CheckCircle2, XCircle, ChevronDown, Plus, FolderOpen, X, ExternalLink, Square, Sparkles, MapPin, Briefcase, Database } from 'lucide-react'
 import { useRouter } from 'next/navigation'
-import type { Preset, Project, SearchProvider } from '@/lib/types'
-import { estimateCost } from '@/lib/area-data'
+import type { Preset, Project } from '@/lib/types'
 import { ProjectCreateModal } from '@/components/modals/project-create-modal'
 import { getErrorMessage } from '@/lib/error-message'
 
@@ -24,16 +23,6 @@ function saveToHistory(area: string, industry: string) {
     const industries = [industry, ...h.industries.filter((i) => i !== industry)].slice(0, MAX_HISTORY)
     localStorage.setItem(HISTORY_KEY, JSON.stringify({ areas, industries }))
   } catch {}
-}
-
-const KEYWORDS_MAP: Record<string, string[]> = {
-  '美容室':      ['美容室', 'ヘアサロン', '美容院', '美容師', 'ヘアカット'],
-  'ヘアサロン':  ['ヘアサロン', '美容室', '美容院', 'ヘアカラー'],
-  'エステサロン': ['エステサロン', '脱毛サロン', 'フェイシャルエステ', 'ボディケア'],
-  '美容クリニック': ['美容クリニック', '医療脱毛', '美容外科', 'スキンケアクリニック'],
-  '歯科医院':    ['歯科', '歯医者', '矯正歯科', 'デンタルクリニック', '小児歯科'],
-  '整骨院':      ['整骨院', '接骨院', '整体院', 'カイロプラクティック'],
-  '中古車販売':  ['中古車', '中古車販売', '中古自動車', 'カーディーラー', 'カーショップ'],
 }
 
 type Status = 'idle' | 'submitting' | 'queued' | 'running' | 'success' | 'error' | 'canceled'
@@ -57,7 +46,6 @@ function loadPanelSettings(): {
   industry?: string
   selectedAreas?: string[]
   selectedProjectId?: string
-  searchProvider?: SearchProvider
 } {
   try {
     const raw = localStorage.getItem(EP_STORAGE_KEY)
@@ -107,12 +95,10 @@ export default function ExecutePanel() {
   const [savingPreset, setSavingPreset] = useState(false)
   const [currentRunIds, setCurrentRunIds] = useState<string[]>([])
   const [canceling, setCanceling] = useState(false)
-  const [searchProvider, setSearchProvider] = useState<SearchProvider>('serper')
   const presetDropdownRef = useRef<HTMLDivElement>(null)
 
   // AI keyword generation
   const [keywords, setKeywords] = useState<string[]>([])
-  const [suffixes, setSuffixes] = useState<string[]>([])
   const [keywordsLoading, setKeywordsLoading] = useState(false)
   const [kwInput, setKwInput] = useState('')
 
@@ -131,7 +117,6 @@ export default function ExecutePanel() {
     const s = loadPanelSettings()
     if (s.industry) setIndustry(s.industry)
     if (Array.isArray(s.selectedAreas) && s.selectedAreas.length > 0) setAreaInput(s.selectedAreas[0])
-    if (s.searchProvider === 'serper' || s.searchProvider === 'places') setSearchProvider(s.searchProvider)
     // Pre-load history for suggestions
     const h = loadHistory()
     setAreaSuggestions(h.areas)
@@ -143,8 +128,8 @@ export default function ExecutePanel() {
   // Persist settings whenever they change (after initial load)
   useEffect(() => {
     if (!_settingsLoaded) return
-    savePanelSettings({ industry, selectedAreas: [areaInput], selectedProjectId, searchProvider })
-  }, [_settingsLoaded, industry, areaInput, selectedProjectId, searchProvider])
+    savePanelSettings({ industry, selectedAreas: [areaInput], selectedProjectId })
+  }, [_settingsLoaded, industry, areaInput, selectedProjectId])
 
   // Validate area input (debounced 800ms)
   useEffect(() => {
@@ -186,7 +171,6 @@ export default function ExecutePanel() {
   useEffect(() => {
     if (!actualIndustry) return
     setKeywords([actualIndustry])
-    setSuffixes([])
     setKeywordsLoading(true)
     const t = setTimeout(async () => {
       try {
@@ -199,9 +183,6 @@ export default function ExecutePanel() {
         if (data.success) {
           if (Array.isArray(data.keywords) && data.keywords.length > 0) {
             setKeywords(data.keywords)
-          }
-          if (Array.isArray(data.suffixes)) {
-            setSuffixes(data.suffixes)
           }
         }
       } catch {
@@ -368,7 +349,7 @@ export default function ExecutePanel() {
     firstItemTimeRef.current = null
     prevLiveCountRef.current = 0
 
-    const activeKeywords = keywords.length > 0 ? keywords : (KEYWORDS_MAP[actualIndustry] ?? [actualIndustry])
+    const activeKeywords = keywords.length > 0 ? keywords : [actualIndustry]
     const effectiveAreas = selectedAreas
     const runIds: string[] = []
     const timestamp = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }).slice(0, 16)
@@ -402,8 +383,7 @@ export default function ExecutePanel() {
             area: areaLabel,
             areas: effectiveAreas,
             keywords: activeKeywords,
-            suffixes: suffixes.length > 0 ? suffixes : undefined,
-            searchProvider,
+            maxResults: 0,
           }),
         })
         const data = await res.json().catch(() => null)
@@ -539,7 +519,6 @@ export default function ExecutePanel() {
     // area may be comma-separated — take first one
     const area = t.area.includes(',') ? t.area.split(',')[0].trim() : t.area
     setAreaInput(area)
-    setSearchProvider(t.searchProvider ?? 'serper')
     setShowPresets(false)
   }
 
@@ -559,8 +538,7 @@ export default function ExecutePanel() {
             industry: actualIndustry,
             area,
             keywords: activeKeywords,
-            searchProvider,
-            maxResults: 50,
+            maxResults: 0,
           },
         }),
       })
@@ -815,49 +793,17 @@ export default function ExecutePanel() {
           )}
         </div>
         <p className="text-xs text-gray-400 mt-0.5">業種・エリア変更で自動再生成 · Enterで追加 · ×で削除</p>
-        {suffixes.length > 0 && (
-          <p className="text-xs text-orange-500 mt-0.5 flex items-center gap-1">
-            <Sparkles className="w-3 h-3" />
-            高密度エリアのため修飾語を追加: {suffixes.map(s => `「${s}」`).join(' ')}
-          </p>
-        )}
       </div>
 
-      {/* Cost estimate + search provider */}
+      {/* Search provider is intentionally fixed to Serper. */}
       <div className="flex items-center justify-between bg-gray-50 border border-gray-200 rounded px-3 py-2">
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs text-gray-500">検索エンジン:</span>
-            <button
-              type="button"
-              onClick={() => setSearchProvider('serper')}
-              disabled={isRunning}
-              className={`text-xs px-2 py-0.5 rounded border transition-colors ${
-                searchProvider === 'serper'
-                  ? 'bg-blue-600 text-white border-blue-600'
-                  : 'bg-white text-gray-600 border-gray-300 hover:border-gray-400'
-              }`}
-            >
-              Serper
-            </button>
-            <button
-              type="button"
-              onClick={() => setSearchProvider('places')}
-              disabled={isRunning}
-              className={`text-xs px-2 py-0.5 rounded border transition-colors ${
-                searchProvider === 'places'
-                  ? 'bg-blue-600 text-white border-blue-600'
-                  : 'bg-white text-gray-600 border-gray-300 hover:border-gray-400'
-              }`}
-            >
-              Google Places
-            </button>
-          </div>
-          <div className="text-xs text-gray-700">
-            概算コスト:&nbsp;
-            <span className="font-semibold">
-              ${estimateCost(keywords.length, selectedAreas, false, 1000000).toFixed(2)}
-            </span>
-          </div>
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-gray-500">検索エンジン:</span>
+          <span className="text-xs px-2 py-0.5 rounded border bg-blue-600 text-white border-blue-600">
+            Serper（ローカル検索）
+          </span>
+        </div>
+        <span className="text-xs text-gray-500">件数上限なし・適合判定あり</span>
         </div>
 
       </div>{/* end space-y-3 */}

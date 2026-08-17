@@ -5,6 +5,11 @@ import * as zlib from 'zlib'
 import { URL } from 'url'
 import { z } from 'zod'
 import OpenAI from 'openai'
+import {
+  evaluateCandidateRelevance,
+  type CandidateRelevanceDecision,
+  type CandidateSource,
+} from '@/lib/search-relevance'
 
 // ── Global concurrency guard ───────────────────────────────────────
 // Allow at most MAX_CONCURRENT_BATCHES simultaneous scraping jobs to
@@ -192,11 +197,25 @@ const REDIRECT_REJECT_HOSTS = [
 // Fast-pass for known external form SaaS — page is a valid contact form without further analysis
 const EXTERNAL_FORM_FAST_PASS_RE = /docs\.google\.com\/forms|forms\.gle|form\.run|formrun\.com|typeform\.com|jotform\.com|tayori\.com|formstack\.com|formzu\.net|form\.kintoneapp|kintone\.com|freeml\.net|mailform\.jp|mfcontact\.com|mfcontacts\.com|formmailer\.jp|tally\.so|paperform\.co|cognito-forms\.com|wufoo\.com|surveymonkey\.com|share\.hsforms\.com|forms\.hubspot\.com|share\.formsite\.com|app\.getresponse\.com|mailchimp\.com|zoho\.com|forms\.office\.com|forms\.microsoft\.com|123formbuilder\.com|formassembly\.com|forms\.app|tripetto\.app|gmomakeform\.com|formhub\.jp|questant\.jp|sendinblue\.com|brevo\.com|f-formz\.com|ws\.formzu\.net|spiral\.ne\.jp|spiral-forms\.net|webcas\.net|n-form\.jp|secure\.n-form\.jp|webto\.salesforce\.com|elfsight\.com|plus\.form-mailer\.jp/i
 
+const CandidateSchema = z.object({
+  url: z.string(),       // HP URL to fetch
+  baseUrl: z.string(),   // same as url (used as base for relative links)
+  industry: z.string().default(''),
+  keywords: z.array(z.string()).default([]),
+  area: z.string().default(''),
+  searchArea: z.string().optional(),
+  source: z.enum(['places', 'organic']).optional(),
+  sourceTitle: z.string().optional(),
+  sourceSnippet: z.string().optional(),
+  sourceAddress: z.string().optional(),
+  sourcePhone: z.string().optional(),
+  sourceCategory: z.string().optional(),
+})
+
+type CandidateInput = z.infer<typeof CandidateSchema>
+
 const Schema = z.object({
-  items: z.array(z.object({
-    url: z.string(),       // HP URL to fetch
-    baseUrl: z.string(),   // same as url (used as base for relative links)
-  })).min(1).max(3000),   // safety cap: prevent OOM from oversized requests (increased from 500 for large-prefecture runs)
+  items: z.array(CandidateSchema).min(1).max(3000), // safety cap: prevent OOM from oversized requests
   timeoutMs: z.number().int().min(1000).max(30000).default(8000),
   concurrency: z.number().int().min(1).max(100).default(30),
   fetchFormPage: z.boolean().default(true), // also fetch the detected form page
@@ -225,6 +244,9 @@ export interface FormExtractResult {
   formPageTitle: string | null
   formTypeHint: 'inquiry' | 'booking' | 'LINE' | 'recruitment' | 'unknown' | null  // detected form type hint
   error: string | null
+  homepageText?: string
+  homepageTitle?: string
+  relevance?: CandidateRelevanceDecision
 }
 
 /**
@@ -1191,6 +1213,11 @@ async function processItem(
     }
   }
 
+  // Retain a bounded, cleaned homepage representation only for the relevance
+  // gate that runs after this batch. It is removed before the API response.
+  const homepageText = cleanHtmlToText(hpFetch.html).slice(0, 20_000)
+  const homepageTitle = extractTitle(hpFetch.html).slice(0, 300)
+
   // Step 2: extract form links
   // Use finalUrl as the base for link resolution — handles http→https redirects and
   // domain migrations so relative links like /contact resolve to the correct origin.
@@ -1246,6 +1273,8 @@ async function processItem(
           contactLinks: [],
           formPageText: null,
           formPageTitle: null,
+          homepageText,
+          homepageTitle,
           error: null,
         }
       }
@@ -1336,7 +1365,7 @@ async function processItem(
     // Accept them directly — they were already classified as LINE by extractForms.
     if (LINE_URL_RE.test(extracted.formUrl)) {
       extracted.formTypeHint = 'LINE'
-      return { url, baseUrl, ...extracted, formPageText, formPageTitle, error: null }
+      return { url, baseUrl, ...extracted, formPageText, formPageTitle, homepageText, homepageTitle, error: null }
     }
 
     // If formUrl is the HP itself (inline form), reuse the already-fetched HTML
@@ -1419,7 +1448,7 @@ async function processItem(
   if (fetchFormPage && !extracted.hasContactLink) {
     let baseOrigin: string
     // Use the redirected URL's origin so probes resolve to the correct server (e.g. https after http→https redirect)
-    try { baseOrigin = new URL(effectiveBase).origin } catch { return { url, baseUrl, ...extracted, formPageText, formPageTitle, error: null } }
+    try { baseOrigin = new URL(effectiveBase).origin } catch { return { url, baseUrl, ...extracted, formPageText, formPageTitle, homepageText, homepageTitle, error: null } }
 
     const hpTitle = extractTitle(hpFetch.html).trim().toLowerCase()
     const hpLen = hpFetch.html.length
@@ -1591,7 +1620,7 @@ async function processItem(
 
   // Fallback: if no form was found but the HP URL itself is a known booking platform,
   // capture it as formType='booking' so it's recorded as a reservation-type entry.
-  // This handles salons/clinics whose Google Places websiteUri IS the booking platform URL.
+  // This handles salons/clinics whose registered website is a booking platform URL.
   if (!extracted.formUrl && !extracted.hasContactLink) {
     try {
       const urlHost = new URL(url).hostname.replace(/^www\./, '')
@@ -1603,7 +1632,7 @@ async function processItem(
     } catch { /* ignore */ }
   }
 
-  return { url, baseUrl, ...extracted, formPageText, formPageTitle, error: null }
+  return { url, baseUrl, ...extracted, formPageText, formPageTitle, homepageText, homepageTitle, error: null }
 }
 
 // ── GPT form-type classifier ───────────────────────────────────────────────────
@@ -1686,7 +1715,7 @@ async function classifyFormWithGpt(
  * share a single in-flight Promise — no duplicate network requests.
  */
 async function processBatch(
-  items: Array<{ url: string; baseUrl: string }>,
+  items: CandidateInput[],
   timeoutMs: number,
   concurrency: number,
   fetchFormPage: boolean
@@ -1745,14 +1774,53 @@ export async function POST(req: NextRequest) {
     const startMs = Date.now()
     const rawResults = await processBatch(items, timeoutMs, concurrency, fetchFormPage)
 
+    // ── Precision-first candidate admission gate ─────────────────────
+    // A high search rank is not enough. Only official Serper Places sites
+    // whose address and on-site industry evidence match are allowed through.
+    const relevanceReasonCounts: Record<string, number> = {}
+    const evaluatedResults = rawResults.map((result, index) => {
+      const candidate = items[index]
+      const relevance = evaluateCandidateRelevance({
+        url: result.url,
+        industry: candidate.industry,
+        keywords: candidate.keywords,
+        area: candidate.area,
+        searchArea: candidate.searchArea,
+        source: candidate.source as CandidateSource | undefined,
+        sourceTitle: candidate.sourceTitle,
+        sourceSnippet: candidate.sourceSnippet,
+        sourceAddress: candidate.sourceAddress,
+        sourceCategory: candidate.sourceCategory,
+        extractedAddress: result.address,
+        homepageTitle: result.homepageTitle,
+        homepageText: result.homepageText,
+      })
+      for (const reason of relevance.reasons) {
+        relevanceReasonCounts[reason] = (relevanceReasonCounts[reason] ?? 0) + 1
+      }
+      if (result.error) {
+        relevanceReasonCounts.hp_fetch_failed = (relevanceReasonCounts.hp_fetch_failed ?? 0) + 1
+      }
+      return {
+        ...result,
+        phone: result.phone || candidate.sourcePhone || null,
+        address: result.address || candidate.sourceAddress || null,
+        relevance,
+      }
+    })
+
+    const admittedResults = evaluatedResults.filter((result) =>
+      result.error === null && result.relevance.status === 'accepted'
+    )
+
     // ── GPT classification pass ──────────────────────────────────────
     // For ambiguous results (formTypeHint is 'inquiry' or null), ask GPT to
     // verify and distinguish inquiry / booking / recruitment / unknown.
     // LINE and booking (URL-pattern reliable) are skipped.
     let gptClassified = 0
-    let results: typeof rawResults = rawResults
+    let results: typeof evaluatedResults = admittedResults
     if (process.env.OPENAI_API_KEY) {
-      const toClassify = rawResults
+      const toClassify = admittedResults
         .map((r, i) => ({ r, i }))
         .filter(({ r }) =>
           r.hasContactLink &&
@@ -1762,7 +1830,7 @@ export async function POST(req: NextRequest) {
         )
 
       if (toClassify.length > 0) {
-        const classified = rawResults.map((r) => ({ ...r }))
+        const classified = admittedResults.map((r) => ({ ...r }))
         const queue = toClassify.slice()
         const GPT_CONCURRENCY = 50
 
@@ -1787,18 +1855,27 @@ export async function POST(req: NextRequest) {
 
     const elapsedMs = Date.now() - startMs
 
-    const successCount  = results.filter((r) => r.error === null).length
-    const formFoundCount = results.filter((r) => r.hasContactLink).length
-    const inquiryCount  = results.filter((r) => r.formTypeHint === 'inquiry').length
-    const unknownCount  = results.filter((r) => r.formTypeHint === 'unknown').length
+    // Homepage text is internal evidence and can be large. Never return it to
+    // n8n; retain only the compact decision and public extraction fields.
+    const responseResults = results.map(({ homepageText: _homepageText, homepageTitle: _homepageTitle, ...result }) => result)
+
+    const successCount  = responseResults.filter((r) => r.error === null).length
+    const formFoundCount = responseResults.filter((r) => r.hasContactLink).length
+    const inquiryCount  = responseResults.filter((r) => r.formTypeHint === 'inquiry').length
+    const unknownCount  = responseResults.filter((r) => r.formTypeHint === 'unknown').length
 
     return NextResponse.json({
       success: true,
-      results,
+      results: responseResults,
       meta: {
-        total: results.length,
+        total: responseResults.length,
+        searchedCandidateCount: items.length,
+        fetchedCount: rawResults.filter((r) => r.error === null).length,
+        relevanceAcceptedCount: responseResults.length,
+        relevanceRejectedCount: items.length - responseResults.length,
+        relevanceReasonCounts,
         successCount,
-        errorCount: results.length - successCount,
+        errorCount: rawResults.filter((r) => r.error !== null).length,
         formFoundCount,
         formFoundRate: Math.round((formFoundCount / Math.max(results.length, 1)) * 100),
         elapsedMs,

@@ -19,6 +19,11 @@ const ResultsSchema = z.object({
   avgMsPerItem:   z.number().int().min(0).optional(),
   subAreaCount:   z.number().int().min(0).optional(),
   queryCount:     z.number().int().min(0).optional(),
+  relevanceRejectedCount: z.number().int().min(0).optional(),
+  searchFailedQueries: z.number().int().min(0).optional(),
+  areaRejectedCount: z.number().int().min(0).optional(),
+  blockedDomainCount: z.number().int().min(0).optional(),
+  duplicateCandidateCount: z.number().int().min(0).optional(),
 }).optional()
 
 // Strict company schema — reject malformed records before DB insert
@@ -72,10 +77,10 @@ export async function POST(
       return NextResponse.json({ success: true, ignored: true, reason: 'run_canceled' })
     }
 
-    // コスト計算: Google Custom Search API + OpenAI LLM の両方を合算する
-    // CSE: queryCount × $0.005/query ($5/1000クエリ)
+    // コスト計算: Serper + OpenAI LLM。Serperの契約単価はプランで
+    // 異なるため、SERPER_COST_PER_QUERY_USD が明示された場合だけ加算する。
     // OpenAI GPT: tokensInput/tokensOutput から calcCostUsd で計算
-    const CSE_COST_PER_QUERY = 0.005
+    const SERPER_COST_PER_QUERY = Number(process.env.SERPER_COST_PER_QUERY_USD || '0')
     let gptCostUsd = 0
     let searchCostUsd = 0
     if (body.tokensInput !== undefined && body.tokensOutput !== undefined) {
@@ -83,7 +88,7 @@ export async function POST(
     }
     const queryCount = body.results?.queryCount ?? body.results?.subAreaCount
     if (queryCount !== undefined && queryCount > 0) {
-      searchCostUsd = queryCount * CSE_COST_PER_QUERY
+      searchCostUsd = queryCount * SERPER_COST_PER_QUERY
     }
     const totalCost = gptCostUsd + searchCostUsd
     const estimatedCostUsd = totalCost > 0 ? totalCost : undefined
@@ -118,6 +123,7 @@ export async function POST(
       tokensInput: body.tokensInput,
       tokensOutput: body.tokensOutput,
       estimatedCostUsd,
+      rawSearchCount: body.results?.totalCompanies,
       completedAt: new Date().toISOString(),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       results: body.results as any,

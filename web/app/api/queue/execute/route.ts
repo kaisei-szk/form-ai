@@ -20,14 +20,12 @@ const Schema = z.object({
   area: z.string().min(1),
   areas: z.array(z.string()).optional(),            // multi-area batch mode
   keywords: z.array(z.string()).optional(),
-  suffixes: z.array(z.string()).optional(),          // AI判定で高密度エリア時のみ設定される検索修飾語
   maxResults: z.number().int().min(0).optional(),  // 0 = unlimited
   // Radius (map-based) mode
   searchMode: z.enum(['prefecture', 'radius']).optional(),
   lat: z.number().optional(),
   lng: z.number().optional(),
   radiusKm: z.number().min(1).max(200).optional(),
-  searchProvider: z.enum(['serper', 'places']).optional(),
 })
 
 /**
@@ -51,9 +49,7 @@ export async function POST(req: NextRequest) {
     }
 
     const keywords = execFields.keywords ?? [execFields.industry]
-    const suffixes = execFields.suffixes ?? []
-    const searchProvider = execFields.searchProvider ?? 'serper'
-    const maxResults = execFields.maxResults ?? 50
+    const maxResults = execFields.maxResults ?? 0
     const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3000'
 
     const startNextQueuedRun = async (next: Awaited<ReturnType<typeof markJobDone>>) => {
@@ -90,7 +86,6 @@ export async function POST(req: NextRequest) {
             area: label,
             areas,
             keywords,
-            searchProvider,
             maxResults,
           },
         },
@@ -112,11 +107,9 @@ export async function POST(req: NextRequest) {
           industry: execFields.industry,
           area: child.searchTarget.area,
           keywords,
-          ...(suffixes.length > 0 && { suffixes }),
           maxResults,
           projectId,
           runId: child.id,
-          searchProvider,
         }
 
         const { canStart, queuePosition } = await enqueue(child.id, projectId, childParams)
@@ -180,11 +173,9 @@ export async function POST(req: NextRequest) {
       industry: execFields.industry,
       area: execFields.area,
       keywords,
-      ...(suffixes.length > 0 && { suffixes }),
       maxResults,
       projectId,
       runId,
-      searchProvider,
       ...(execFields.searchMode === 'radius' && {
         searchMode: 'radius',
         lat: execFields.lat,
@@ -201,7 +192,6 @@ export async function POST(req: NextRequest) {
         industry: execFields.industry,
         area: execFields.area,
         keywords,
-        searchProvider,
         maxResults,
         ...(execFields.searchMode === 'radius' && {
           searchMode: 'radius' as const,

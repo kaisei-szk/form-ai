@@ -4,8 +4,7 @@
 
 | サービス | 用途 | 費用 |
 |---------|------|------|
-| Google Custom Search API | 企業検索 | 無料枠3,000件/日、超過分 $5/1,000件 |
-| Google Maps Places API | 詳細情報取得（電話・住所） | $0.017/件 |
+| Serper API | ローカル事業者・公式HP検索 | 契約プランによる |
 | OpenAI API (gpt-4o-mini) | フォーム種別判定 | ~$0.15/1Mトークン |
 | Google Sheets API | リスト書き込み | 無料 |
 
@@ -19,21 +18,9 @@
 
 ### 1-2. APIの有効化
 以下のAPIを有効化してください：
-- Custom Search API
-- Maps JavaScript API（Places API含む）
 - Google Sheets API
 
-### 1-3. APIキーの作成
-1. 「認証情報」→「認証情報を作成」→「APIキー」
-2. HTTPリファラーまたはIPアドレスで制限をかけることを推奨
-
-### 1-4. Custom Search Engine の作成
-1. [Programmable Search Engine](https://programmablesearchengine.google.com/) を開く
-2. 新しい検索エンジンを作成
-3. 「ウェブ全体を検索」を有効にする
-4. 検索エンジンIDをメモ
-
-### 1-5. サービスアカウントの作成（Sheets API用）
+### 1-3. サービスアカウントの作成（Sheets API用）
 1. 「認証情報」→「認証情報を作成」→「サービスアカウント」
 2. サービスアカウントを作成
 3. 「キー」タブ→「キーを追加」→「JSONキーを作成」
@@ -60,9 +47,7 @@ cp .env.example .env
 `.env` を編集：
 
 ```env
-GOOGLE_SEARCH_API_KEY=your_api_key
-GOOGLE_SEARCH_ENGINE_ID=your_search_engine_id
-GOOGLE_MAPS_API_KEY=your_maps_api_key
+SERPER_API_KEY=your_serper_api_key
 OPENAI_API_KEY=your_openai_key
 GOOGLE_SHEETS_ID=your_spreadsheet_id
 ```
@@ -85,7 +70,7 @@ GOOGLE_SHEETS_ID=your_spreadsheet_id
           "industry": "美容室",
           "area": "東京都",
           "keywords": ["美容室", "ヘアサロン"],
-          "maxResults": 50
+          "maxResults": 0
         }
       ]
     }
@@ -111,8 +96,7 @@ npm start
    - **Google Sheets API** - OAuth2またはサービスアカウント
    - **OpenAI API** - APIキー
 4. n8nの「Variables」に以下を設定：
-   - `GOOGLE_SEARCH_API_KEY`
-   - `GOOGLE_SEARCH_ENGINE_ID`
+   - `SERPER_API_KEY`
    - `GOOGLE_SHEETS_ID`
 5. 「実行」ボタンで手動実行、またはスケジュールで自動実行
 
@@ -154,8 +138,8 @@ docker run -it --rm \
 
 ## トラブルシューティング
 
-**Google Search APIエラー (429)**
-→ `REQUEST_DELAY_MS` を増やす（デフォルト: 2000ms）
+**Serper APIエラー (429)**
+→ APIプランの上限を確認してください。検索は一時エラーを最大3回再試行し、失敗数を実行履歴へ記録します。
 
 **スプレッドシートへの書き込みエラー**
 → サービスアカウントにスプレッドシートの「編集者」権限があるか確認

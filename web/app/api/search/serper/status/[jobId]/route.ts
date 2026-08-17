@@ -28,11 +28,18 @@ export async function GET(req: NextRequest, { params }: { params: { jobId: strin
     }
 
     if (job.status === 'done') {
-      return NextResponse.json({
+      const stored = job.result_items
+      const payload: { items?: unknown[]; stats?: unknown; warning?: unknown } = stored && !Array.isArray(stored) && typeof stored === 'object'
+        ? stored as { items?: unknown[]; stats?: unknown; warning?: unknown }
+        : { items: Array.isArray(stored) ? stored : [] }
+      const response: Record<string, unknown> = {
         ...base,
         count: job.result_count,
-        items: job.result_items,
-      })
+        items: payload.items ?? [],
+      }
+      if (payload.stats !== undefined) response.stats = payload.stats
+      if (payload.warning !== undefined) response.warning = payload.warning
+      return NextResponse.json(response)
     }
 
     if (job.status === 'error') {

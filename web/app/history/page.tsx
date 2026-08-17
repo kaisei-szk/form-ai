@@ -84,7 +84,7 @@ function CostBreakdown({ run }: { run: RunWithProject }) {
           <div className="font-semibold text-gray-300 mb-1.5 text-[11px]">コスト内訳</div>
           {placesCost > 0 && (
             <div className="flex items-center justify-between gap-6 mb-1">
-              <span className="text-gray-400">Google Places API</span>
+              <span className="text-gray-400">Serper ローカル検索</span>
               <span className="text-green-400 font-mono">${placesCost.toFixed(3)}</span>
             </div>
           )}
@@ -208,8 +208,7 @@ export default function HistoryPage() {
           // Pass individual areas array when available (enables exact multi-area reproduction)
           ...(st?.areas && st.areas.length > 1 ? { areas: st.areas } : {}),
           keywords: st?.keywords ?? [],
-          searchProvider: st?.searchProvider ?? 'serper',
-          maxResults: st?.maxResults ?? 50,
+          maxResults: 0,
           // Preserve radius mode parameters if the original run used them
           ...(st?.searchMode === 'radius' && {
             searchMode: 'radius',

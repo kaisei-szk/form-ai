@@ -425,8 +425,7 @@ export default function ProjectResultsPage() {
         industry: st.industry,
         area: st.area,
         keywords: st.keywords,
-        searchProvider: st.searchProvider ?? 'serper',
-        maxResults: st.maxResults,
+        maxResults: 0,
       }
       if (st.areas && st.areas.length > 1) body.areas = st.areas
       if (st.searchMode === 'radius') {

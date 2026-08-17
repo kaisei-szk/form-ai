@@ -1,6 +1,6 @@
 # 企業フォーム自動収集ツール
 
-Google Places API で企業を検索し、各社ウェブサイトからお問い合わせフォームのURLを自動収集するシステムです。収集結果はGoogle スプレッドシートに書き込まれ、ブラウザから確認・CSV出力できます。
+Serper のローカル検索で地域・業種に適合する公式HPを収集し、各サイトからお問い合わせフォームのURLを自動探索するシステムです。地域・業種・公式サイトの根拠が揃わない候補は保存しません。
 
 ## システム構成
 
@@ -9,7 +9,7 @@ Google Places API で企業を検索し、各社ウェブサイトからお問�
 | **Next.js (web)** | ダッシュボードUI・APIサーバー |
 | **n8n** | 検索・スクレイピング・AI判定のワークフロー実行エンジン |
 | **Playwright Service** | フォーム送信用ブラウザ自動化サービス |
-| **Google Places API** | 企業リスト取得 |
+| **Serper API** | ローカル事業者・公式HP候補の取得 |
 | **OpenAI GPT-4o-mini** | フォーム種別（問い合わせ vs 予約）の自動判定 |
 | **Google Sheets** | 収集結果の永続ストレージ |
 
@@ -18,8 +18,8 @@ Google Places API で企業を検索し、各社ウェブサイトからお問�
 ```
 [ダッシュボード] → [n8n webhook]
   → L-01: 検索パラメータ設定
-  → L-02: Google Places API で企業リスト取得（エリア細分化・全ページ収集）
-  → L-03: 各社HP取得・フォームリンク抽出（Cheerio）
+  → L-02: Serper で公式HP候補を独立検索語ごとに全ページ収集
+  → L-03: 地域・業種・公式HPの適合判定、フォームリンク抽出
   → L-04: GPT によるフォーム種別判定（問い合わせ/予約/不明）
   → L-05: 重複チェック（既存シートと照合）
   → L-06: Google Sheets に書き込み
@@ -31,7 +31,8 @@ Google Places API で企業を検索し、各社ウェブサイトからお問�
 ### 必要なもの
 
 - Docker / Docker Compose
-- Google Cloud プロジェクト（Places API・Sheets API 有効化済み）
+- Serper API キー
+- Google Cloud プロジェクト（Sheets API 有効化済み）
 - OpenAI API キー
 - Google サービスアカウント（Sheets 書き込み権限）
 
@@ -54,7 +55,7 @@ cp .env.example .env
 
 | 変数名 | 説明 |
 |---|---|
-| `GOOGLE_MAPS_API_KEY` | Places API が有効なGoogle APIキー |
+| `SERPER_API_KEY` | Serper APIキー |
 | `OPENAI_API_KEY` | OpenAI APIキー |
 | `GOOGLE_SHEETS_ID` | 収集先スプレッドシートID（空白で自動作成） |
 | `SHEETS_OWNER_EMAIL` | スプレッドシートを共有するGmailアドレス |
@@ -84,7 +85,7 @@ docker compose up -d
 2. 設定 → API Keys から APIキーを発行し、`.env` の `N8N_API_KEY` に記入
 3. ワークフローを手動でインポート（`n8n/workflow.json`）するか、後述のスクリプトで自動デプロイ
 
-n8n のワークフロー内で使用する環境変数（`GOOGLE_MAPS_API_KEY`、`OPENAI_API_KEY` など）は、n8n の Variables 設定で登録するか、`docker-compose.yml` の `environment` 経由で渡します。
+n8n のワークフロー内で使用する環境変数（`SERPER_API_KEY`、`OPENAI_API_KEY` など）は、n8n の Variables 設定で登録するか、`docker-compose.yml` の `environment` 経由で渡します。
 
 **6. ワークフローのデプロイ（自動）**
 
@@ -155,12 +156,13 @@ npm run build
 
 実行履歴の「収集件数」列に `N件中 X%` の形式で変換率が表示されます。
 
-- N件 = Google Places API が返した企業の総数
-- X% = そのうちフォームが見つかって実際に収集できた割合
+- N件 = Serper候補からポータル・地域外・重複を除いた公式HP候補数
+- X% = 適合判定を通過し、実際に保存できた割合
 
 ## 注意事項
 
-- Google Places API は1クエリあたり最大60件（3ページ×20件）の制限があります。エリア細分化により1回の実行で最大数千件の検索を行います。
+- 検索語はAND/ORで結合せず、それぞれ独立してSerper検索し、重複除去後に統合します。
+- Serperの一部ページが失敗した場合は再試行し、失敗数を実行履歴へ記録します。
 - 大規模実行（全国・複数業種など）は相応の API 費用と実行時間が必要です。
 - `.env` および `config/service-account.json` には機密情報が含まれるためリポジトリに含めないでください。
 

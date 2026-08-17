@@ -155,7 +155,7 @@ function PresetsSection() {
               <div className="flex-1 min-w-0">
                 <div className="font-medium text-gray-900 text-sm">{p.name}</div>
                 <div className="text-xs text-gray-500 mt-0.5">
-                  {p.searchTarget.industry} · {p.searchTarget.area} · {p.searchTarget.maxResults}件
+                  {p.searchTarget.industry} · {p.searchTarget.area} · {p.searchTarget.maxResults > 0 ? `${p.searchTarget.maxResults}件` : '件数上限なし'}
                   {p.searchTarget.keywords.length > 0 && (
                     <span> · KW: {p.searchTarget.keywords.slice(0, 3).join(', ')}{p.searchTarget.keywords.length > 3 ? '...' : ''}</span>
                   )}
@@ -213,7 +213,7 @@ function RunItem({ run, onToggle, onDelete }: RunItemProps) {
           {run.searchTargets.map((t, i) => (
             <div key={i} className="text-xs text-gray-500 bg-white rounded px-3 py-2 border border-gray-200">
               <span className="text-gray-800 font-medium">{t.industry}</span>
-              {' / '}{t.area}{' / '}{t.maxResults}件
+              {' / '}{t.area}{' / '}{t.maxResults > 0 ? `${t.maxResults}件` : '件数上限なし'}
               {t.keywords.length > 0 && (
                 <span className="ml-2 text-gray-400">KW: {t.keywords.join(', ')}</span>
               )}
@@ -233,7 +233,6 @@ function RunsSection() {
   const [newLabel, setNewLabel] = useState('')
   const [newIndustry, setNewIndustry] = useState('')
   const [newArea, setNewArea] = useState('東京都')
-  const [newMax, setNewMax] = useState(50)
   const [saving, setSaving] = useState(false)
 
   const load = async () => {
@@ -299,7 +298,7 @@ function RunsSection() {
           run: {
             enabled: true,
             label: newLabel,
-            searchTargets: [{ industry: newIndustry, area: newArea, keywords, maxResults: newMax }],
+            searchTargets: [{ industry: newIndustry, area: newArea, keywords, maxResults: 0 }],
           },
         }),
       })
@@ -366,14 +365,8 @@ function RunsSection() {
               />
             </div>
             <div>
-              <label className="block text-xs text-gray-500 mb-1">最大件数</label>
-              <input
-                type="number"
-                value={newMax}
-                onChange={(e) => setNewMax(parseInt(e.target.value) || 50)}
-                min={1} max={200}
-                className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none"
-              />
+              <label className="block text-xs text-gray-500 mb-1">件数上限</label>
+              <div className="w-full bg-gray-100 border border-gray-200 rounded px-3 py-2 text-sm text-gray-600">上限なし</div>
             </div>
           </div>
           <div className="flex gap-2 justify-end">

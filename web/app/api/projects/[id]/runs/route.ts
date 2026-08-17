@@ -19,7 +19,7 @@ const AddRunSchema = z.object({
     industry: z.string(),
     area: z.string(),
     keywords: z.array(z.string()),
-    maxResults: z.number().int().min(1),
+    maxResults: z.number().int().min(0),
   }),
 })
 

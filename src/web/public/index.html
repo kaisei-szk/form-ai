@@ -94,7 +94,7 @@
             <th>業種</th>
             <th>エリア</th>
             <th>キーワード</th>
-            <th>最大件数</th>
+            <th>件数上限</th>
             <th>状態</th>
             <th></th>
           </tr>
@@ -150,8 +150,8 @@
           <span class="help-text">空白の場合は業種名が自動設定されます</span>
         </div>
         <div class="form-group">
-          <label>最大件数</label>
-          <input type="number" id="f-max" value="50" min="10" max="200">
+          <label>件数上限</label>
+          <input type="text" value="上限なし" disabled>
         </div>
         <div class="form-group">
           <label>ラベル（任意）</label>
@@ -207,7 +207,7 @@ function renderRuns() {
       <td>${t.industry || '-'}</td>
       <td>${t.area || '全国'}</td>
       <td class="keywords-list">${(t.keywords || []).slice(0,3).join(', ')}</td>
-      <td>${t.maxResults || 50}</td>
+      <td>${t.maxResults > 0 ? t.maxResults : '上限なし'}</td>
       <td><span class="tag ${run.enabled ? 'tag-enabled' : 'tag-disabled'}">${run.enabled ? '有効' : '無効'}</span></td>
       <td>
         <div class="actions">
@@ -299,7 +299,7 @@ async function addRun() {
   const keywords = keywordsRaw
     ? keywordsRaw.split(',').map(k => k.trim()).filter(Boolean)
     : [industry]
-  const maxResults = parseInt(document.getElementById('f-max').value) || 50
+  const maxResults = 0
   const label = document.getElementById('f-label').value.trim() || `${area}・${industry}`
 
   const run = {

@@ -139,21 +139,32 @@ export function expandArea(area: string): string[] {
   return [area]
 }
 
-export type SerperItem = {
-  title: string
-  link:  string
-  snippet?: string
-}
-
 export type SerperResultItem = {
   link: string
   title: string
   snippet: string
   keyword: string
   area: string
+  source: 'places'
+  address: string
+  phone: string
+  category: string
+  placeId: string
 }
 
-export const DEFAULT_SUFFIXES = ['お問い合わせ', '公式サイト', 'contact', '予約', '申込み']
+export interface SerperSearchStats {
+  queriesExecuted: number
+  failedQueries: number
+  rawCandidateCount: number
+  noWebsiteCount: number
+  areaRejectedCount: number
+  blockedDomainCount: number
+  duplicateCount: number
+  candidateCount: number
+  exhaustedQueryCount: number
+  keywordsUsed: string[]
+  normalizedArea: string
+}
 
 // ポータル・SNS・アグリゲータドメイン — serper結果から事前除外
 const SKIP_DOMAINS = new Set([
@@ -170,78 +181,217 @@ const SKIP_DOMAINS = new Set([
 
 function extractHost(url: string): string {
   const m = url.match(/^https?:\/\/([^/?#]+)/)
-  return m ? m[1].replace(/^www\./, '') : ''
+  return m ? m[1].replace(/^www\./, '').toLowerCase() : ''
+}
+
+function normalizeCandidateUrl(url: string): string {
+  try {
+    const parsed = new URL(url)
+    parsed.hash = ''
+    const removable = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'fbclid']
+    removable.forEach((key) => parsed.searchParams.delete(key))
+    parsed.hostname = parsed.hostname.toLowerCase().replace(/^www\./, '')
+    parsed.pathname = parsed.pathname.replace(/\/{2,}/g, '/').replace(/\/$/, '') || '/'
+    return parsed.toString()
+  } catch {
+    return ''
+  }
+}
+
+function normalizeAreaName(rawArea: string): string {
+  const area = rawArea.normalize('NFKC').trim()
+  const prefectures = Object.keys(PREF_DISTRICTS)
+  return prefectures.find((prefecture) => prefecture.replace(/[都道府県]$/u, '') === area) ?? area
+}
+
+function normalizeForMatch(value: string): string {
+  return value.normalize('NFKC').toLowerCase().replace(/[\s\u3000]/g, '')
+}
+
+function isAddressInRequestedArea(address: string, rawArea: string): boolean {
+  const area = normalizeForMatch(normalizeAreaName(rawArea))
+    .replace(/(?:駅周辺|駅付近|周辺|付近)$/u, '')
+  return Boolean(area && address && normalizeForMatch(address).includes(area))
+}
+
+type SerperPlace = {
+  title?: string
+  address?: string
+  website?: string
+  phoneNumber?: string
+  description?: string
+  type?: string
+  category?: string
+  placeId?: string
+  cid?: string
+}
+
+type QueryPageResult = {
+  places?: SerperPlace[]
+  error?: { status: number; text: string }
+}
+
+async function fetchPlacesPage(
+  query: string,
+  page: number,
+  apiKey: string,
+): Promise<QueryPageResult> {
+  const maxAttempts = 3
+  let lastError: { status: number; text: string } | undefined
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const res = await fetch('https://google.serper.dev/places', {
+        method: 'POST',
+        headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ q: query, gl: 'jp', hl: 'ja', page }),
+        signal: AbortSignal.timeout(30_000),
+      })
+
+      if (res.ok) {
+        const data = await res.json() as { error?: string; places?: SerperPlace[] }
+        if (!data.error) return { places: data.places ?? [] }
+        lastError = { status: 502, text: data.error }
+      } else {
+        lastError = { status: res.status, text: await res.text() }
+        if (res.status !== 429 && res.status < 500) break
+      }
+    } catch (error) {
+      lastError = { status: 599, text: error instanceof Error ? error.message : String(error) }
+    }
+
+    if (attempt + 1 < maxAttempts) {
+      const delayMs = Math.min(8_000, 1_000 * (2 ** attempt)) + Math.floor(Math.random() * 250)
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+  }
+
+  return { error: lastError ?? { status: 500, text: 'Unknown Serper error' } }
 }
 
 export async function runSerperSearch(params: {
   keywords: string[]
   area: string
-  suffixes?: string[]
+  maxResults?: number
   apiKey: string
-}): Promise<{ items: SerperResultItem[]; error?: { status: number; text: string } }> {
-  const { keywords, area, suffixes, apiKey } = params
-  // エリア展開はUI/n8nのバッチ分割に委譲。ここでは単一エリアとして扱う
-  const subAreas = [area]
-  const pages = 10
-  const SUFFIXES = (suffixes && suffixes.length > 0) ? suffixes : DEFAULT_SUFFIXES
-
-  type QueryJob = { query: string; kw: string; subArea: string; page: number }
-  const jobs: QueryJob[] = []
-  for (const kw of keywords) {
-    for (const subArea of subAreas) {
-      for (const suffix of SUFFIXES) {
-        const query = suffix ? `${kw} ${subArea} ${suffix}` : `${kw} ${subArea}`
-        for (let p = 0; p < pages; p++) {
-          jobs.push({ query, kw, subArea, page: p + 1 })
-        }
-      }
-    }
-  }
-
-  const CONCURRENCY = 20
+}): Promise<{
+  items: SerperResultItem[]
+  stats: SerperSearchStats
+  error?: { status: number; text: string }
+}> {
+  const normalizedArea = normalizeAreaName(params.area)
+  const keywords = [...new Set(params.keywords.map((keyword) => keyword.normalize('NFKC').trim()).filter(Boolean))]
+  const resultLimit = params.maxResults && params.maxResults > 0 ? params.maxResults : Number.POSITIVE_INFINITY
+  const maxPages = 10
+  const concurrency = 5
+  const seenPlaces = new Set<string>()
   const seenUrls = new Set<string>()
-  const seenHosts = new Set<string>()
-  const rawResults: SerperResultItem[] = []
-  let hasApiError: { status: number; text: string } | null = null
+  const exhaustedQueries = new Set<string>()
+  const zeroNewPages = new Map<string, number>()
+  const items: SerperResultItem[] = []
+  const errors: Array<{ status: number; text: string }> = []
 
-  for (let i = 0; i < jobs.length; i += CONCURRENCY) {
-    const batch = jobs.slice(i, i + CONCURRENCY)
-    const results = await Promise.all(batch.map(async ({ query, kw, subArea, page }) => {
-      const res = await fetch('https://google.serper.dev/search', {
-        method: 'POST',
-        headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ q: query, gl: 'jp', hl: 'ja', num: 10, page }),
-      })
-      if (!res.ok) {
-        const text = await res.text()
-        return { error: { status: res.status, text } }
-      }
-      const data = await res.json() as { error?: string; organic?: SerperItem[] }
-      if (data.error) return { items: [] as SerperResultItem[] }
-      return {
-        items: (data.organic ?? []).map(item => ({
-          link: item.link || '', title: item.title || '', snippet: item.snippet || '', keyword: kw, area: subArea,
-        })),
-      }
-    }))
-
-    for (const r of results) {
-      if ('error' in r && r.error) { hasApiError = r.error; break }
-      for (const item of (r as { items: SerperResultItem[] }).items ?? []) {
-        if (!item.link) continue
-        if (seenUrls.has(item.link)) continue
-        const host = extractHost(item.link)
-        if (!host) continue
-        if (SKIP_DOMAINS.has(host) || [...SKIP_DOMAINS].some(d => host.endsWith('.' + d))) continue
-        if (seenHosts.has(host)) continue
-        seenUrls.add(item.link)
-        seenHosts.add(host)
-        rawResults.push(item)
-      }
-    }
-    if (hasApiError) break
+  const stats: SerperSearchStats = {
+    queriesExecuted: 0,
+    failedQueries: 0,
+    rawCandidateCount: 0,
+    noWebsiteCount: 0,
+    areaRejectedCount: 0,
+    blockedDomainCount: 0,
+    duplicateCount: 0,
+    candidateCount: 0,
+    exhaustedQueryCount: 0,
+    keywordsUsed: keywords,
+    normalizedArea,
   }
 
-  if (hasApiError) return { items: rawResults, error: hasApiError }
-  return { items: rawResults }
+  // Page-major ordering spreads requests across every independent retrieval
+  // term before going deeper into any one result set. No AND/OR query syntax or
+  // contact-form suffix is used.
+  for (let page = 1; page <= maxPages && items.length < resultLimit; page++) {
+    const activeKeywords = keywords.filter((keyword) => !exhaustedQueries.has(keyword))
+    if (activeKeywords.length === 0) break
+
+    for (let offset = 0; offset < activeKeywords.length && items.length < resultLimit; offset += concurrency) {
+      const batch = activeKeywords.slice(offset, offset + concurrency)
+      const responses = await Promise.all(batch.map(async (keyword) => ({
+        keyword,
+        response: await fetchPlacesPage(`${keyword} ${normalizedArea}`, page, params.apiKey),
+      })))
+      stats.queriesExecuted += batch.length
+
+      for (const { keyword, response } of responses) {
+        if (response.error) {
+          stats.failedQueries++
+          errors.push(response.error)
+          continue
+        }
+
+        const places = response.places ?? []
+        let newPlacesOnPage = 0
+        stats.rawCandidateCount += places.length
+
+        for (const place of places) {
+          const placeKey = place.placeId || place.cid || `${place.title ?? ''}|${place.address ?? ''}`
+          if (!placeKey || seenPlaces.has(placeKey)) {
+            stats.duplicateCount++
+            continue
+          }
+          seenPlaces.add(placeKey)
+          newPlacesOnPage++
+
+          const link = place.website?.trim() ?? ''
+          if (!link) {
+            stats.noWebsiteCount++
+            continue
+          }
+          if (!isAddressInRequestedArea(place.address ?? '', normalizedArea)) {
+            stats.areaRejectedCount++
+            continue
+          }
+
+          const host = extractHost(link)
+          if (!host || SKIP_DOMAINS.has(host) || [...SKIP_DOMAINS].some((domain) => host.endsWith(`.${domain}`))) {
+            stats.blockedDomainCount++
+            continue
+          }
+
+          const normalizedUrl = normalizeCandidateUrl(link)
+          if (!normalizedUrl || seenUrls.has(normalizedUrl)) {
+            stats.duplicateCount++
+            continue
+          }
+          seenUrls.add(normalizedUrl)
+          items.push({
+            link,
+            title: place.title ?? '',
+            snippet: place.description ?? '',
+            keyword,
+            area: normalizedArea,
+            source: 'places',
+            address: place.address ?? '',
+            phone: place.phoneNumber ?? '',
+            category: place.type ?? place.category ?? '',
+            placeId: place.placeId ?? place.cid ?? placeKey,
+          })
+          if (items.length >= resultLimit) break
+        }
+
+        // Relevance filtering must not make pagination stop early. Saturation is
+        // based on unseen places returned by Serper, not accepted candidates.
+        const consecutiveEmpty = newPlacesOnPage === 0 ? (zeroNewPages.get(keyword) ?? 0) + 1 : 0
+        zeroNewPages.set(keyword, consecutiveEmpty)
+        if (places.length === 0 || consecutiveEmpty >= 2) exhaustedQueries.add(keyword)
+      }
+
+      if (items.length < resultLimit) {
+        await new Promise((resolve) => setTimeout(resolve, 1_100))
+      }
+    }
+  }
+
+  stats.candidateCount = items.length
+  stats.exhaustedQueryCount = exhaustedQueries.size
+  const error = errors.length > 0 ? errors[0] : undefined
+  return { items, stats, ...(error && { error }) }
 }

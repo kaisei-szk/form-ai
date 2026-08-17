@@ -9,7 +9,6 @@ const Schema = z.object({
   industry:   z.string().optional(),
   area:       z.string().min(1),
   maxResults: z.number().int().min(0).default(0),
-  suffixes:   z.array(z.string()).optional(),
 })
 
 export async function POST(req: NextRequest) {
@@ -28,18 +27,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'SERPER_API_KEY not configured' }, { status: 500 })
     }
 
-    const { items, error: apiErr } = await runSerperSearch({
+    const { items, stats, error: apiErr } = await runSerperSearch({
       keywords: body.keywords,
       area: body.area,
-      suffixes: body.suffixes,
+      maxResults: body.maxResults,
       apiKey,
     })
 
-    if (apiErr) {
+    if (apiErr && items.length === 0) {
       return NextResponse.json({ success: false, error: `Serper API error: ${apiErr.status} ${apiErr.text}` }, { status: 502 })
     }
 
-    return NextResponse.json({ success: true, items, count: items.length })
+    return NextResponse.json({
+      success: true,
+      items,
+      count: items.length,
+      stats,
+      ...(apiErr && { warning: `一部のSerper検索に失敗しました: ${apiErr.status} ${apiErr.text}` }),
+    })
   } catch (e) {
     return NextResponse.json({ success: false, error: String(e) }, { status: 400 })
   }

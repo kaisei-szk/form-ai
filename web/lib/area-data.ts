@@ -121,15 +121,3 @@ export function getSubAreaCount(pref: string): number {
 export function getTestCity(pref: string): string {
   return PREF_TEST_CITY[pref] ?? pref
 }
-
-/** キーワード数・都道府県リスト・テストモードから概算コストを計算する (CSE: $5/1000クエリ) */
-export function estimateCost(kwCount: number, prefs: string[], testMode: boolean, maxResults = 50): number {
-  if (kwCount === 0 || prefs.length === 0) return 0
-  // CSE: 1クエリ10件、maxResults件取得に必要なページ数
-  const pagesPerQuery = Math.ceil(Math.min(maxResults, 100) / 10)
-  const costPerQuery = 0.005  // $5/1000クエリ
-  if (testMode) {
-    return kwCount * pagesPerQuery * costPerQuery
-  }
-  return kwCount * prefs.length * pagesPerQuery * costPerQuery
-}

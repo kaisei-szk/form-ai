@@ -21,7 +21,6 @@ export interface SearchTarget {
   area: string
   areas?: string[]  // individual prefectures for multi-area runs (for accurate retry)
   keywords: string[]
-  searchProvider?: SearchProvider
   maxResults: number
   // Radius (map-based) mode fields — optional, only set when searchMode = 'radius'
   searchMode?: 'prefecture' | 'radius'
@@ -59,8 +58,8 @@ export interface Preset {
 // ─── Benchmark results ────────────────────────────────────────
 
 export interface BenchmarkResults {
-  totalCompanies: number      // L-02 Google Places total
-  afterDedup: number          // after removing duplicates (already scraped)
+  totalCompanies: number      // Serper official-HP candidates after source-level cleanup
+  afterDedup: number          // candidates accepted by the relevance gate
   successCount: number        // HP fetch success
   errorCount: number          // HP fetch error
   formFoundCount: number      // companies with contact form detected
@@ -69,6 +68,12 @@ export interface BenchmarkResults {
   elapsedMs: number           // total elapsed time
   avgMsPerItem: number        // elapsedMs / afterDedup
   subAreaCount?: number       // number of sub-areas searched
+  queryCount?: number
+  relevanceRejectedCount?: number
+  searchFailedQueries?: number
+  areaRejectedCount?: number
+  blockedDomainCount?: number
+  duplicateCandidateCount?: number
 }
 
 // ─── Project types ────────────────────────────────────────────
@@ -96,8 +101,8 @@ export interface ProjectRun {
   tokensInput?: number
   tokensOutput?: number
   estimatedCostUsd?: number
-  // Accuracy stats: Places API hit count vs final written count
-  rawSearchCount?: number   // total places found by Google Places (before filtering)
+  // Accuracy stats: Serper candidate count vs final written count
+  rawSearchCount?: number   // Serper official-HP candidates before site relevance filtering
   results?: BenchmarkResults
   // Queue
   queuePosition?: number  // 1-based position in waiting queue; undefined = not queued
@@ -159,18 +164,14 @@ export interface N8nExecution {
 }
 
 export type SearchMode = 'prefecture' | 'radius'
-export type SearchProvider = 'serper' | 'places'
-
 export interface ExecuteParams {
   industry: string
   area: string
   areas?: string[]   // multi-area single-session mode
   keywords?: string[]
-  suffixes?: string[]  // AI判定で高密度エリア時のみ設定される検索修飾語
   maxResults?: number
   projectId: string
   runId: string
-  searchProvider?: SearchProvider  // 'serper'（デフォルト）or 'places'
   // Radius (map-based) mode
   searchMode?: SearchMode
   lat?: number

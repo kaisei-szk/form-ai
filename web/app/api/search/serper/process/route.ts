@@ -29,15 +29,15 @@ export async function POST(req: NextRequest) {
     // Mark running
     await supabase.from('serper_jobs').update({ status: 'running', started_at: new Date().toISOString() }).eq('id', jobId)
 
-    const params = job.params as { keywords: string[]; area: string; suffixes?: string[] }
-    const { items, error: apiErr } = await runSerperSearch({
+    const params = job.params as { keywords: string[]; area: string; maxResults?: number }
+    const { items, stats, error: apiErr } = await runSerperSearch({
       keywords: params.keywords,
       area: params.area,
-      suffixes: params.suffixes,
+      maxResults: params.maxResults,
       apiKey,
     })
 
-    if (apiErr) {
+    if (apiErr && items.length === 0) {
       await supabase.from('serper_jobs').update({
         status: 'error',
         error: `Serper API error: ${apiErr.status} ${apiErr.text}`,
@@ -49,7 +49,7 @@ export async function POST(req: NextRequest) {
     await supabase.from('serper_jobs').update({
       status: 'done',
       result_count: items.length,
-      result_items: items,
+      result_items: { items, stats, ...(apiErr && { warning: apiErr }) },
       completed_at: new Date().toISOString(),
     }).eq('id', jobId)
 
