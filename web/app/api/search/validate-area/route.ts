@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
+import { validateAreaInput } from '@/lib/search-relevance'
 
 export const dynamic = 'force-dynamic'
 
@@ -8,9 +9,13 @@ const Schema = z.object({ area: z.string().min(1).max(100) })
 export async function POST(req: NextRequest) {
   try {
     const { area } = Schema.parse(await req.json())
+    const areaValidation = validateAreaInput(area)
+    if (!areaValidation.valid) {
+      return NextResponse.json(areaValidation)
+    }
     const apiKey = process.env.SERPER_API_KEY
     if (!apiKey) {
-      return NextResponse.json({ valid: true, normalized: area })
+      return NextResponse.json(areaValidation)
     }
 
     const res = await fetch('https://google.serper.dev/search', {
@@ -36,7 +41,7 @@ export async function POST(req: NextRequest) {
     const valid = hasResults || hasKG
 
     // Try to extract normalized name from knowledge graph
-    const normalized = data.knowledgeGraph?.title ?? area
+    const normalized = areaValidation.normalized
 
     return NextResponse.json({ valid, normalized })
   } catch (e) {

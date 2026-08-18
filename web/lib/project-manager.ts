@@ -267,7 +267,7 @@ export async function rollupBatchRun(parentRunId: string): Promise<void> {
     .select('*')
     .in('id', parent.childRunIds)
   if (childError) throw childError
-  const children = (childRows ?? []).map(rowToRun)
+  const children: ProjectRun[] = (childRows ?? []).map(rowToRun)
 
   const allTerminal = children.every((c: ProjectRun) => c.status === 'success' || c.status === 'completed' || c.status === 'error')
   if (!allTerminal) return
@@ -282,6 +282,62 @@ export async function rollupBatchRun(parentRunId: string): Promise<void> {
   const totalRawSearch = children.reduce((s: number, c: ProjectRun) => s + (c.rawSearchCount      ?? 0), 0)
   const allSucceeded   = children.every((c: ProjectRun) => c.status === 'success' || c.status === 'completed')
   const failedChildren = children.filter((c: ProjectRun) => c.status === 'error')
+  const numericResultKeys: Array<keyof import('./types').BenchmarkResults> = [
+    'totalCompanies', 'afterDedup', 'successCount', 'errorCount', 'formFoundCount',
+    'itemsWritten', 'elapsedMs', 'queryCount', 'relevanceRejectedCount',
+    'searchFailedQueries', 'areaRejectedCount', 'blockedDomainCount',
+    'duplicateCandidateCount', 'rawCandidateCount', 'uniquePlaceCount',
+    'noWebsiteCount', 'paginationRepeatCount', 'exhaustedQueryCount',
+    'pageCapReachedQueryCount', 'hpFetchFailureCount',
+    'placesCandidateCount', 'organicCandidateCount', 'organicRawCandidateCount',
+    'organicRejectedCount', 'organicQueriesExecuted', 'organicFailedQueries',
+    'organicExhaustedQueryCount', 'organicPageCapReachedQueryCount',
+    'searchElapsedMs',
+  ]
+  const rolledResults: import('./types').BenchmarkResults = {
+    totalCompanies: 0,
+    afterDedup: 0,
+    successCount: 0,
+    errorCount: 0,
+    formFoundCount: 0,
+    formFoundRate: 0,
+    itemsWritten: totalItems,
+    elapsedMs: 0,
+    avgMsPerItem: 0,
+  }
+  for (const key of numericResultKeys) {
+    const total = children.reduce((sum: number, child: ProjectRun) => {
+      const value = child.results?.[key]
+      return sum + (typeof value === 'number' ? value : 0)
+    }, 0)
+    // Every key in numericResultKeys is numeric by construction.
+    ;(rolledResults as unknown as Record<string, number>)[key] = total
+  }
+  rolledResults.formFoundRate = Math.round(
+    ((rolledResults.formFoundCount ?? 0) / Math.max(rolledResults.afterDedup ?? 0, 1)) * 100,
+  )
+  rolledResults.avgMsPerItem = Math.round(
+    (rolledResults.elapsedMs ?? 0) / Math.max(rolledResults.afterDedup ?? 0, 1),
+  )
+  rolledResults.maxPages = children.reduce((max: number, child: ProjectRun) => Math.max(max, child.results?.maxPages ?? 0), 0) || undefined
+  rolledResults.organicMaxPages = children.reduce(
+    (max: number, child: ProjectRun) => Math.max(max, child.results?.organicMaxPages ?? 0),
+    0,
+  ) || undefined
+  rolledResults.searchTimeBudgetReached = children.some(
+    (child) => child.results?.searchTimeBudgetReached === true,
+  )
+  rolledResults.relevanceReasonCounts = children.reduce<Record<string, number>>((totals, child) => {
+    for (const [reason, count] of Object.entries(child.results?.relevanceReasonCounts ?? {})) {
+      totals[reason] = (totals[reason] ?? 0) + count
+    }
+    return totals
+  }, {})
+  rolledResults.warnings = [...new Set(children.flatMap((child) => child.results?.warnings ?? []))].slice(0, 100)
+
+  const childErrorDetails = failedChildren
+    .map((child) => `${child.searchTarget.area}: ${child.error || '不明なエラー'}`)
+    .slice(0, 10)
 
   const { error } = await supabase
     .from('project_runs')
@@ -293,9 +349,10 @@ export async function rollupBatchRun(parentRunId: string): Promise<void> {
       tokens_input:       totalTokIn > 0 ? totalTokIn : null,
       tokens_output:      totalTokOut > 0 ? totalTokOut : null,
       raw_search_count:   totalRawSearch > 0 ? totalRawSearch : null,
+      results:            rolledResults,
       error:              allSucceeded
         ? null
-        : `${failedChildren.length}/${children.length}件のエリアで実行に失敗しました`,
+        : `${failedChildren.length}/${children.length}件のエリアで実行に失敗しました: ${childErrorDetails.join(' / ')}`,
     })
     .eq('id', parentRunId)
   if (error) throw error

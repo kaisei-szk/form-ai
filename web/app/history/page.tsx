@@ -209,13 +209,6 @@ export default function HistoryPage() {
           ...(st?.areas && st.areas.length > 1 ? { areas: st.areas } : {}),
           keywords: st?.keywords ?? [],
           maxResults: 0,
-          // Preserve radius mode parameters if the original run used them
-          ...(st?.searchMode === 'radius' && {
-            searchMode: 'radius',
-            lat: st.lat,
-            lng: st.lng,
-            radiusKm: st.radiusKm,
-          }),
         }),
       })
       const result = await response.json().catch(() => null)
@@ -414,6 +407,14 @@ export default function HistoryPage() {
                           {run.error}
                         </div>
                       )}
+                      {(run.results?.warnings?.length ?? 0) > 0 && (
+                        <div
+                          className="text-xs text-amber-600 max-w-[240px] truncate"
+                          title={run.results?.warnings?.join('\n')}
+                        >
+                          注意: {run.results?.warnings?.[0]}
+                        </div>
+                      )}
                     </div>
                   </td>
 
@@ -435,6 +436,31 @@ export default function HistoryPage() {
                             }>
                               {((run.itemsWritten / run.rawSearchCount) * 100).toFixed(1)}%
                             </span>
+                          </div>
+                        )}
+                        {run.results?.rawCandidateCount !== undefined && (
+                          <div
+                            className="text-[11px] leading-4 text-gray-500 whitespace-nowrap"
+                            title={[
+                              `Serper生候補: ${run.results.rawCandidateCount}`,
+                              `固有Places: ${run.results.uniquePlaceCount ?? 0}`,
+                              `HP候補: ${run.results.totalCompanies ?? 0}`,
+                              `公式HP採用: ${run.results.afterDedup ?? 0}`,
+                              `フォーム: ${run.results.formFoundCount ?? 0}`,
+                              `地域外除外: ${run.results.areaRejectedCount ?? 0}`,
+                              `ポータル除外: ${run.results.blockedDomainCount ?? 0}`,
+                              `関連性除外: ${run.results.relevanceRejectedCount ?? 0}`,
+                            ].join('\n')}
+                          >
+                            生 {run.results.rawCandidateCount.toLocaleString()}
+                            {' → '}候補 {(run.results.totalCompanies ?? 0).toLocaleString()}
+                            {' → '}公式 {(run.results.afterDedup ?? 0).toLocaleString()}
+                            {' → '}フォーム {(run.results.formFoundCount ?? 0).toLocaleString()}
+                          </div>
+                        )}
+                        {run.results?.searchTimeBudgetReached && (
+                          <div className="text-[11px] text-amber-600">
+                            時間予算で部分結果を保存
                           </div>
                         )}
                         {(() => {

@@ -86,27 +86,11 @@ create table if not exists public.presets (
   search_target  jsonb not null default '{}'::jsonb
 );
 
-create table if not exists public.serper_jobs (
-  id            text primary key,
-  status        text not null default 'queued',
-  params        jsonb not null default '{}'::jsonb,
-  result_count  integer,
-  result_items  jsonb,
-  error         text,
-  created_at    timestamptz not null default now(),
-  started_at    timestamptz,
-  completed_at  timestamptz
-);
-
-create index if not exists idx_serper_jobs_status on public.serper_jobs(status);
-create index if not exists idx_serper_jobs_created_at on public.serper_jobs(created_at desc);
-
 alter table public.companies enable row level security;
 alter table public.projects enable row level security;
 alter table public.project_runs enable row level security;
 alter table public.queue_jobs enable row level security;
 alter table public.presets enable row level security;
-alter table public.serper_jobs enable row level security;
 
 -- Make newly created tables visible to the REST API immediately.
 notify pgrst, 'reload schema';

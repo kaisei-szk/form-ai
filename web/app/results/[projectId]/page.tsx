@@ -428,12 +428,6 @@ export default function ProjectResultsPage() {
         maxResults: 0,
       }
       if (st.areas && st.areas.length > 1) body.areas = st.areas
-      if (st.searchMode === 'radius') {
-        body.searchMode = 'radius'
-        body.lat = st.lat
-        body.lng = st.lng
-        body.radiusKm = st.radiusKm
-      }
       const res = await fetch('/api/queue/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

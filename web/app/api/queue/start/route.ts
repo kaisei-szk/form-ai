@@ -16,10 +16,6 @@ const Schema = z.object({
     maxResults: z.number().optional(),
     projectId: z.string(),
     runId: z.string(),
-    searchMode: z.enum(['prefecture', 'radius']).optional(),
-    lat: z.number().optional(),
-    lng: z.number().optional(),
-    radiusKm: z.number().optional(),
   }),
 })
 

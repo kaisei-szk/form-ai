@@ -146,7 +146,7 @@ export default function ExecutePanel() {
         })
         const data = await res.json()
         setAreaValid(data.valid !== false)
-        if (data.valid === false) setAreaError(`「${areaInput}」は地名として認識できませんでした`)
+        if (data.valid === false) setAreaError(data.reason || `「${areaInput}」は地名として認識できませんでした`)
         else setAreaError('')
       } catch {
         setAreaValid(true) // network error → don't block
@@ -714,7 +714,7 @@ export default function ExecutePanel() {
               value={areaInput}
               onChange={(e) => { setAreaInput(e.target.value); setAreaValid(null) }}
               onFocus={() => { if (areaSuggestions.length > 0) setShowAreaSuggestions(true) }}
-              placeholder="例: 渋谷区、新宿駅周辺、横浜市..."
+              placeholder="例: 渋谷区、大阪府、横浜市"
               disabled={isRunning}
               className={`w-full bg-white border rounded px-3 py-2 text-sm text-gray-900 focus:outline-none disabled:opacity-50 ${
                 areaError ? 'border-red-400 focus:border-red-400' :

@@ -6,7 +6,8 @@
     "dev": "next dev --port 3000",
     "build": "next build",
     "start": "next start --port 3000",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test:search": "node --test --experimental-strip-types lib/serper.test.ts lib/search-relevance.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",

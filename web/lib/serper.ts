@@ -1,151 +1,10 @@
-// 都道府県→市区町村展開マップ
-export const PREF_DISTRICTS: Record<string, string[]> = {
-  '東京都': [
-    '千代田区','中央区','港区','新宿区','文京区','台東区','墨田区','江東区',
-    '品川区','目黒区','大田区','世田谷区','渋谷区','中野区','杉並区','豊島区',
-    '北区','荒川区','板橋区','練馬区','足立区','葛飾区','江戸川区',
-    '八王子市','立川市','武蔵野市','三鷹市','青梅市','府中市','昭島市',
-    '調布市','町田市','小金井市','小平市','日野市','東村山市','国分寺市',
-    '国立市','福生市','狛江市','東大和市','清瀬市','東久留米市','武蔵村山市',
-    '多摩市','稲城市','羽村市','あきる野市','西東京市',
-  ],
-  '大阪府': [
-    '大阪市北区','大阪市中央区','大阪市西区','大阪市浪速区','大阪市天王寺区',
-    '大阪市淀川区','大阪市東淀川区','大阪市東成区','大阪市生野区','大阪市旭区',
-    '大阪市城東区','大阪市鶴見区','大阪市阿倍野区','大阪市住之江区','大阪市住吉区',
-    '大阪市東住吉区','大阪市平野区','大阪市西成区',
-    '堺市堺区','堺市北区','堺市中区','堺市東区','堺市西区','堺市南区',
-    '豊中市','吹田市','高槻市','茨木市','枚方市','寝屋川市','東大阪市',
-    '八尾市','松原市','大東市','和泉市','箕面市','守口市','門真市',
-  ],
-  '神奈川県': [
-    '横浜市西区','横浜市中区','横浜市南区','横浜市港南区','横浜市保土ケ谷区',
-    '横浜市旭区','横浜市磯子区','横浜市金沢区','横浜市港北区','横浜市緑区',
-    '横浜市青葉区','横浜市都筑区','横浜市鶴見区','横浜市神奈川区','横浜市戸塚区',
-    '横浜市栄区','横浜市泉区','横浜市瀬谷区',
-    '川崎市川崎区','川崎市幸区','川崎市中原区','川崎市高津区','川崎市多摩区',
-    '川崎市宮前区','川崎市麻生区',
-    '相模原市緑区','相模原市中央区','相模原市南区',
-    '横須賀市','平塚市','鎌倉市','藤沢市','小田原市','茅ヶ崎市','厚木市','大和市',
-  ],
-  '愛知県': [
-    '名古屋市中区','名古屋市東区','名古屋市西区','名古屋市北区','名古屋市昭和区',
-    '名古屋市瑞穂区','名古屋市熱田区','名古屋市中村区','名古屋市中川区','名古屋市港区',
-    '名古屋市南区','名古屋市守山区','名古屋市緑区','名古屋市名東区','名古屋市天白区',
-    '豊田市','豊橋市','岡崎市','一宮市','春日井市','豊川市','刈谷市','安城市','西尾市',
-  ],
-  '福岡県': [
-    '福岡市東区','福岡市博多区','福岡市中央区','福岡市南区','福岡市西区',
-    '福岡市城南区','福岡市早良区',
-    '北九州市門司区','北九州市小倉北区','北九州市小倉南区','北九州市若松区',
-    '北九州市八幡東区','北九州市八幡西区','北九州市戸畑区',
-    '久留米市','飯塚市','春日市','大野城市','宗像市','糸島市','筑紫野市',
-  ],
-  '兵庫県': [
-    '神戸市東灘区','神戸市灘区','神戸市兵庫区','神戸市長田区','神戸市須磨区',
-    '神戸市垂水区','神戸市北区','神戸市中央区','神戸市西区',
-    '姫路市','尼崎市','明石市','西宮市','芦屋市','伊丹市','宝塚市','川西市','三田市',
-  ],
-  '埼玉県': [
-    'さいたま市西区','さいたま市北区','さいたま市大宮区','さいたま市見沼区',
-    'さいたま市中央区','さいたま市桜区','さいたま市浦和区','さいたま市南区',
-    'さいたま市緑区','さいたま市岩槻区',
-    '川越市','熊谷市','川口市','行田市','所沢市','加須市','春日部市','狭山市',
-    '上尾市','草加市','越谷市','蕨市','戸田市','入間市','朝霞市','志木市','和光市',
-    '新座市','桶川市','久喜市','北本市','鴻巣市','蓮田市','坂戸市','幸手市',
-  ],
-  '千葉県': [
-    '千葉市中央区','千葉市花見川区','千葉市稲毛区','千葉市若葉区','千葉市緑区','千葉市美浜区',
-    '市川市','船橋市','松戸市','野田市','柏市','市原市','流山市','八千代市',
-    '我孫子市','鎌ケ谷市','浦安市','四街道市','習志野市','佐倉市','木更津市',
-  ],
-  '京都府': [
-    '京都市北区','京都市上京区','京都市左京区','京都市中京区','京都市東山区',
-    '京都市山科区','京都市下京区','京都市南区','京都市右京区','京都市西京区',
-    '京都市伏見区',
-    '宇治市','亀岡市','向日市','長岡京市','八幡市','京田辺市','木津川市',
-  ],
-  '北海道': [
-    '札幌市中央区','札幌市北区','札幌市東区','札幌市白石区','札幌市豊平区',
-    '札幌市南区','札幌市西区','札幌市厚別区','札幌市手稲区','札幌市清田区',
-    '旭川市','函館市','釧路市','帯広市','北見市','苫小牧市','小樽市',
-    '江別市','千歳市','恵庭市',
-  ],
-  '青森県': ['青森市','弘前市','八戸市','十和田市','むつ市','五所川原市','三沢市'],
-  '岩手県': ['盛岡市','花巻市','北上市','奥州市','一関市','宮古市','釜石市'],
-  '宮城県': [
-    '仙台市青葉区','仙台市宮城野区','仙台市若林区','仙台市太白区','仙台市泉区',
-    '石巻市','大崎市','気仙沼市','塩竈市','名取市','多賀城市','登米市',
-  ],
-  '秋田県': ['秋田市','横手市','大仙市','能代市','由利本荘市','湯沢市','男鹿市'],
-  '山形県': ['山形市','鶴岡市','酒田市','天童市','上山市','米沢市','新庄市'],
-  '福島県': ['福島市','郡山市','いわき市','会津若松市','白河市','須賀川市','喜多方市','二本松市'],
-  '茨城県': [
-    '水戸市','つくば市','日立市','土浦市','古河市','取手市','牛久市',
-    'ひたちなか市','龍ケ崎市','守谷市','常総市','筑西市',
-  ],
-  '栃木県': ['宇都宮市','小山市','栃木市','足利市','佐野市','鹿沼市','日光市','那須塩原市'],
-  '群馬県': ['前橋市','高崎市','太田市','伊勢崎市','桐生市','渋川市','藤岡市','富岡市'],
-  '新潟県': [
-    '新潟市中央区','新潟市東区','新潟市江南区','新潟市秋葉区',
-    '長岡市','上越市','燕市','三条市','柏崎市','新発田市',
-  ],
-  '富山県': ['富山市','高岡市','射水市','魚津市','砺波市','小矢部市'],
-  '石川県': ['金沢市','白山市','小松市','加賀市','七尾市','輪島市'],
-  '福井県': ['福井市','敦賀市','越前市','坂井市','鯖江市','大野市'],
-  '山梨県': ['甲府市','富士吉田市','甲斐市','笛吹市','中央市','都留市'],
-  '長野県': ['長野市','松本市','上田市','岡谷市','飯田市','諏訪市','茅野市','塩尻市'],
-  '岐阜県': ['岐阜市','大垣市','各務原市','可児市','多治見市','羽島市','美濃加茂市'],
-  '静岡県': [
-    '静岡市葵区','静岡市駿河区','静岡市清水区',
-    '浜松市中区','浜松市東区','浜松市西区',
-    '沼津市','富士市','磐田市','焼津市','掛川市','藤枝市','袋井市','富士宮市',
-  ],
-  '三重県': ['津市','四日市市','伊勢市','松阪市','桑名市','鈴鹿市','名張市','亀山市'],
-  '滋賀県': ['大津市','草津市','彦根市','長浜市','近江八幡市','守山市','栗東市','甲賀市'],
-  '奈良県': ['奈良市','橿原市','生駒市','大和郡山市','天理市','桜井市','香芝市'],
-  '和歌山県': ['和歌山市','海南市','橋本市','有田市','田辺市','新宮市'],
-  '鳥取県': ['鳥取市','米子市','倉吉市','境港市'],
-  '島根県': ['松江市','出雲市','浜田市','益田市','大田市'],
-  '岡山県': [
-    '岡山市北区','岡山市中区','岡山市東区','岡山市南区',
-    '倉敷市','津山市','玉野市','笠岡市','総社市','赤磐市',
-  ],
-  '広島県': [
-    '広島市中区','広島市東区','広島市南区','広島市西区',
-    '広島市安佐南区','広島市安佐北区','広島市佐伯区','広島市安芸区',
-    '福山市','呉市','東広島市','尾道市','廿日市市',
-  ],
-  '山口県': ['山口市','下関市','宇部市','周南市','防府市','岩国市','光市'],
-  '徳島県': ['徳島市','阿南市','鳴門市','吉野川市'],
-  '香川県': ['高松市','丸亀市','坂出市','善通寺市','観音寺市'],
-  '愛媛県': ['松山市','今治市','新居浜市','西条市','四国中央市','宇和島市'],
-  '高知県': ['高知市','南国市','四万十市','香南市'],
-  '佐賀県': ['佐賀市','唐津市','鳥栖市','伊万里市'],
-  '長崎県': ['長崎市','佐世保市','諫早市','大村市','島原市'],
-  '熊本県': [
-    '熊本市中央区','熊本市東区','熊本市西区','熊本市南区','熊本市北区',
-    '八代市','玉名市','菊池市','宇土市','合志市',
-  ],
-  '大分県': ['大分市','別府市','中津市','佐伯市','日田市','杵築市'],
-  '宮崎県': ['宮崎市','都城市','延岡市','日南市','小林市','日向市'],
-  '鹿児島県': ['鹿児島市','霧島市','薩摩川内市','姶良市','鹿屋市','出水市','指宿市'],
-  '沖縄県': ['那覇市','沖縄市','浦添市','うるま市','宜野湾市','豊見城市','名護市','糸満市'],
-}
-
-export function expandArea(area: string): string[] {
-  const isPref = area.endsWith('都') || area.endsWith('道') || area.endsWith('府') || area.endsWith('県')
-  if (isPref && PREF_DISTRICTS[area]) return PREF_DISTRICTS[area]
-  return [area]
-}
-
 export type SerperResultItem = {
   link: string
   title: string
   snippet: string
   keyword: string
   area: string
-  source: 'places'
+  source: 'places' | 'organic'
   address: string
   phone: string
   category: string
@@ -155,13 +14,28 @@ export type SerperResultItem = {
 export interface SerperSearchStats {
   queriesExecuted: number
   failedQueries: number
+  organicQueriesExecuted: number
+  organicFailedQueries: number
   rawCandidateCount: number
+  organicRawCandidateCount: number
+  organicRejectedCount: number
+  uniquePlaceCount: number
   noWebsiteCount: number
   areaRejectedCount: number
   blockedDomainCount: number
   duplicateCount: number
+  paginationRepeatCount: number
   candidateCount: number
+  placesCandidateCount: number
+  organicCandidateCount: number
+  organicExhaustedQueryCount: number
+  organicPageCapReachedQueryCount: number
+  organicMaxPages: number
+  searchTimeBudgetReached: boolean
+  searchElapsedMs: number
   exhaustedQueryCount: number
+  pageCapReachedQueryCount: number
+  maxPages: number
   keywordsUsed: string[]
   normalizedArea: string
 }
@@ -172,16 +46,35 @@ const SKIP_DOMAINS = new Set([
   'navitime.co.jp','navitime.jp','mapion.co.jp','its-mo.com',
   'yelp.com','yelp.co.jp','retty.me','gurunavi.com','gnavi.co.jp',
   'google.com','google.co.jp','facebook.com','instagram.com','twitter.com','x.com',
-  'youtube.com','wikipedia.org','linkedin.com','tiktok.com',
+  'youtube.com','wikipedia.org','linkedin.com','tiktok.com','ameblo.jp','note.com',
+  'lit.link','linktr.ee',
   'recruit.co.jp','indeed.com','wantedly.com','yahoo.co.jp',
   'rakuten.co.jp','amazon.co.jp',
   'beauty.hotpepper.jp','minimo.io','hairbook.jp','riyou.jp',
-  'epark.jp','homemate-research.com','zehitomo.com','baseconnect.in',
+  'beauty-navi.com','ozmall.co.jp','epark.jp','homemate-research.com','zehitomo.com','baseconnect.in',
+  'itp.ne.jp','job-medley.com','en-gage.net','doda.jp','openwork.jp',
+  'coubic.com','reserva.be','airrsv.net','b-merit.jp','select-type.com',
+  'prtimes.jp','imitsu.jp','initial.inc','buffett-code.com','compalyze.co.jp',
+  'ipros.com','bizreach.jp','talentsquare.co.jp','hrsquare.jp','batonz.jp',
+  'ma-search.com','jma-a.org','map.yahoo.co.jp','mapfan.com','loco.yahoo.co.jp',
+  'chosakun.com','nikkeibp.co.jp','fudousan.or.jp',
+  'bestsalonreport.jp','beauty-park.jp','minimodel.jp','cuts.jp',
+  'hairsalon-map.com','9483.jp','kotomise.jp','repicolle.jp','pathee.com',
+  'hair-land.jp','e-shops.jp','athome.co.jp','bizloop.jp','tgnr.jp',
+  'yayoi-kk.co.jp','mid-tenshoku.com','inshokuten.com','kokoshiro.jp',
+  'tdb-publish.com','my.site.com','next-sfa.jp','ma-pro.com','ma-succeed.jp',
+  'maa-a.or.jp','ma-shoukei.com','tranbi.com','ma-japan.info',
+  'biz-maps.com','careercross.com',
+  'value-press.com','careerticket.jp','in-fra.jp','rocketreach.co','houjin.jp',
 ])
 
 function extractHost(url: string): string {
   const m = url.match(/^https?:\/\/([^/?#]+)/)
   return m ? m[1].replace(/^www\./, '').toLowerCase() : ''
+}
+
+function isNonProductionHost(host: string): boolean {
+  return /^(?:test\d*|stg|staging|dev|demo|preview)$/u.test(host.split('.')[0] ?? '')
 }
 
 function normalizeCandidateUrl(url: string): string {
@@ -200,7 +93,16 @@ function normalizeCandidateUrl(url: string): string {
 
 function normalizeAreaName(rawArea: string): string {
   const area = rawArea.normalize('NFKC').trim()
-  const prefectures = Object.keys(PREF_DISTRICTS)
+  const prefectures = [
+    '北海道', '東京都', '京都府', '大阪府',
+    '青森県', '岩手県', '宮城県', '秋田県', '山形県', '福島県',
+    '茨城県', '栃木県', '群馬県', '埼玉県', '千葉県', '神奈川県',
+    '新潟県', '富山県', '石川県', '福井県', '山梨県', '長野県',
+    '岐阜県', '静岡県', '愛知県', '三重県', '滋賀県', '兵庫県',
+    '奈良県', '和歌山県', '鳥取県', '島根県', '岡山県', '広島県',
+    '山口県', '徳島県', '香川県', '愛媛県', '高知県', '福岡県',
+    '佐賀県', '長崎県', '熊本県', '大分県', '宮崎県', '鹿児島県', '沖縄県',
+  ]
   return prefectures.find((prefecture) => prefecture.replace(/[都道府県]$/u, '') === area) ?? area
 }
 
@@ -210,8 +112,12 @@ function normalizeForMatch(value: string): string {
 
 function isAddressInRequestedArea(address: string, rawArea: string): boolean {
   const area = normalizeForMatch(normalizeAreaName(rawArea))
-    .replace(/(?:駅周辺|駅付近|周辺|付近)$/u, '')
   return Boolean(area && address && normalizeForMatch(address).includes(area))
+}
+
+function readBoundedInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(raw ?? '', 10)
+  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback
 }
 
 type SerperPlace = {
@@ -221,6 +127,7 @@ type SerperPlace = {
   phoneNumber?: string
   description?: string
   type?: string
+  types?: string[]
   category?: string
   placeId?: string
   cid?: string
@@ -228,6 +135,17 @@ type SerperPlace = {
 
 type QueryPageResult = {
   places?: SerperPlace[]
+  error?: { status: number; text: string }
+}
+
+type SerperOrganic = {
+  title?: string
+  link?: string
+  snippet?: string
+}
+
+type OrganicPageResult = {
+  organic?: SerperOrganic[]
   error?: { status: number; text: string }
 }
 
@@ -269,22 +187,76 @@ async function fetchPlacesPage(
   return { error: lastError ?? { status: 500, text: 'Unknown Serper error' } }
 }
 
+async function fetchOrganicPage(
+  query: string,
+  page: number,
+  apiKey: string,
+): Promise<OrganicPageResult> {
+  const maxAttempts = 3
+  let lastError: { status: number; text: string } | undefined
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const res = await fetch('https://google.serper.dev/search', {
+        method: 'POST',
+        headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ q: query, gl: 'jp', hl: 'ja', page }),
+        signal: AbortSignal.timeout(30_000),
+      })
+
+      if (res.ok) {
+        const data = await res.json() as { error?: string; organic?: SerperOrganic[] }
+        if (!data.error) return { organic: data.organic ?? [] }
+        lastError = { status: 502, text: data.error }
+      } else {
+        lastError = { status: res.status, text: await res.text() }
+        if (res.status !== 429 && res.status < 500) break
+      }
+    } catch (error) {
+      lastError = { status: 599, text: error instanceof Error ? error.message : String(error) }
+    }
+
+    if (attempt + 1 < maxAttempts) {
+      const delayMs = Math.min(8_000, 1_000 * (2 ** attempt)) + Math.floor(Math.random() * 250)
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+  }
+
+  return { error: lastError ?? { status: 500, text: 'Unknown Serper error' } }
+}
+
 export async function runSerperSearch(params: {
   keywords: string[]
   area: string
   maxResults?: number
+  maxPages?: number
+  includeOrganic?: boolean
   apiKey: string
 }): Promise<{
   items: SerperResultItem[]
   stats: SerperSearchStats
   error?: { status: number; text: string }
+  errors: Array<{ status: number; text: string }>
 }> {
+  const startedAt = Date.now()
+  const timeBudgetMs = readBoundedInt(process.env.SERPER_TIME_BUDGET_MS, 240_000, 60_000, 280_000)
+  const deadline = startedAt + timeBudgetMs
+  let searchTimeBudgetReached = false
+  // Leave enough room for one worst-case 30-second Serper request batch and
+  // response serialization before the platform's 300-second hard timeout.
+  const hasTimeForBatch = () => Date.now() < deadline - 35_000
   const normalizedArea = normalizeAreaName(params.area)
-  const keywords = [...new Set(params.keywords.map((keyword) => keyword.normalize('NFKC').trim()).filter(Boolean))]
+  const keywords = [...new Set(params.keywords
+    .map((keyword) => keyword.normalize('NFKC').trim())
+    .filter((keyword) => keyword && !/\b(?:AND|OR)\b|[|()]/iu.test(keyword))
+  )].slice(0, 30)
   const resultLimit = params.maxResults && params.maxResults > 0 ? params.maxResults : Number.POSITIVE_INFINITY
-  const maxPages = 10
-  const concurrency = 5
+  // A finite cap protects API credits, while still allowing operators to raise
+  // the depth without changing code when a broad category has not saturated.
+  const maxPages = params.maxPages ?? readBoundedInt(process.env.SERPER_MAX_PAGES, 50, 1, 50)
+  const concurrency = readBoundedInt(process.env.SERPER_CONCURRENCY, 5, 1, 10)
   const seenPlaces = new Set<string>()
+  const seenPlacesByKeyword = new Map<string, Set<string>>()
   const seenUrls = new Set<string>()
   const exhaustedQueries = new Set<string>()
   const zeroNewPages = new Map<string, number>()
@@ -294,13 +266,28 @@ export async function runSerperSearch(params: {
   const stats: SerperSearchStats = {
     queriesExecuted: 0,
     failedQueries: 0,
+    organicQueriesExecuted: 0,
+    organicFailedQueries: 0,
     rawCandidateCount: 0,
+    organicRawCandidateCount: 0,
+    organicRejectedCount: 0,
+    uniquePlaceCount: 0,
     noWebsiteCount: 0,
     areaRejectedCount: 0,
     blockedDomainCount: 0,
     duplicateCount: 0,
+    paginationRepeatCount: 0,
     candidateCount: 0,
+    placesCandidateCount: 0,
+    organicCandidateCount: 0,
+    organicExhaustedQueryCount: 0,
+    organicPageCapReachedQueryCount: 0,
+    organicMaxPages: 0,
+    searchTimeBudgetReached: false,
+    searchElapsedMs: 0,
     exhaustedQueryCount: 0,
+    pageCapReachedQueryCount: 0,
+    maxPages,
     keywordsUsed: keywords,
     normalizedArea,
   }
@@ -308,11 +295,15 @@ export async function runSerperSearch(params: {
   // Page-major ordering spreads requests across every independent retrieval
   // term before going deeper into any one result set. No AND/OR query syntax or
   // contact-form suffix is used.
-  for (let page = 1; page <= maxPages && items.length < resultLimit; page++) {
+  placesLoop: for (let page = 1; page <= maxPages && items.length < resultLimit; page++) {
     const activeKeywords = keywords.filter((keyword) => !exhaustedQueries.has(keyword))
     if (activeKeywords.length === 0) break
 
     for (let offset = 0; offset < activeKeywords.length && items.length < resultLimit; offset += concurrency) {
+      if (!hasTimeForBatch()) {
+        searchTimeBudgetReached = true
+        break placesLoop
+      }
       const batch = activeKeywords.slice(offset, offset + concurrency)
       const responses = await Promise.all(batch.map(async (keyword) => ({
         keyword,
@@ -330,15 +321,33 @@ export async function runSerperSearch(params: {
         const places = response.places ?? []
         let newPlacesOnPage = 0
         stats.rawCandidateCount += places.length
+        const keywordSeen = seenPlacesByKeyword.get(keyword) ?? new Set<string>()
+        seenPlacesByKeyword.set(keyword, keywordSeen)
 
         for (const place of places) {
           const placeKey = place.placeId || place.cid || `${place.title ?? ''}|${place.address ?? ''}`
-          if (!placeKey || seenPlaces.has(placeKey)) {
+          if (!placeKey) {
+            stats.duplicateCount++
+            continue
+          }
+
+          // Saturation is per query. A place found earlier through another
+          // synonym must still count as new for this keyword, otherwise later
+          // keywords are incorrectly stopped after two pages.
+          if (keywordSeen.has(placeKey)) {
+            stats.paginationRepeatCount++
+            continue
+          }
+          keywordSeen.add(placeKey)
+          newPlacesOnPage++
+
+          // Final output remains globally deduplicated across all synonyms.
+          if (seenPlaces.has(placeKey)) {
             stats.duplicateCount++
             continue
           }
           seenPlaces.add(placeKey)
-          newPlacesOnPage++
+          stats.uniquePlaceCount++
 
           const link = place.website?.trim() ?? ''
           if (!link) {
@@ -351,7 +360,7 @@ export async function runSerperSearch(params: {
           }
 
           const host = extractHost(link)
-          if (!host || SKIP_DOMAINS.has(host) || [...SKIP_DOMAINS].some((domain) => host.endsWith(`.${domain}`))) {
+          if (!host || isNonProductionHost(host) || SKIP_DOMAINS.has(host) || [...SKIP_DOMAINS].some((domain) => host.endsWith(`.${domain}`))) {
             stats.blockedDomainCount++
             continue
           }
@@ -371,7 +380,7 @@ export async function runSerperSearch(params: {
             source: 'places',
             address: place.address ?? '',
             phone: place.phoneNumber ?? '',
-            category: place.type ?? place.category ?? '',
+            category: [...new Set([place.type, place.category, ...(place.types ?? [])].filter(Boolean))].join(' / '),
             placeId: place.placeId ?? place.cid ?? placeKey,
           })
           if (items.length >= resultLimit) break
@@ -381,7 +390,9 @@ export async function runSerperSearch(params: {
         // based on unseen places returned by Serper, not accepted candidates.
         const consecutiveEmpty = newPlacesOnPage === 0 ? (zeroNewPages.get(keyword) ?? 0) + 1 : 0
         zeroNewPages.set(keyword, consecutiveEmpty)
-        if (places.length === 0 || consecutiveEmpty >= 2) exhaustedQueries.add(keyword)
+        // A single empty page can be transient. Stop only after two consecutive
+        // pages with no unseen places for this exact keyword.
+        if (consecutiveEmpty >= 2) exhaustedQueries.add(keyword)
       }
 
       if (items.length < resultLimit) {
@@ -392,6 +403,132 @@ export async function runSerperSearch(params: {
 
   stats.candidateCount = items.length
   stats.exhaustedQueryCount = exhaustedQueries.size
+  stats.pageCapReachedQueryCount = keywords.filter((keyword) => !exhaustedQueries.has(keyword)).length
+  stats.placesCandidateCount = items.length
+
+  // Serper's regular web results can recover official sites that are absent
+  // from a Places listing. They remain only discovery candidates: the later
+  // relevance gate requires on-site address and industry evidence before an
+  // organic result is admitted.
+  if (params.includeOrganic !== false && items.length < resultLimit) {
+    const organicMaxPages = readBoundedInt(process.env.SERPER_ORGANIC_MAX_PAGES, 20, 1, 20)
+    const organicQueryLimit = readBoundedInt(process.env.SERPER_ORGANIC_QUERY_LIMIT, 30, 1, 60)
+    // These are independent plain queries, not AND/OR syntax. The variants
+    // diversify Serper's ranking without changing or subdividing the area.
+    const organicVariants = ['公式', '会社概要', '']
+    const organicQueries = organicVariants
+      .flatMap((variant) => keywords.map((keyword) => ({
+        key: `${keyword}\u0000${variant || 'plain'}`,
+        keyword,
+        query: [keyword, normalizedArea, variant].filter(Boolean).join(' '),
+      })))
+      .slice(0, organicQueryLimit)
+    const organicExhausted = new Set<string>()
+    const organicZeroNewPages = new Map<string, number>()
+    const organicSeenByKeyword = new Map<string, Set<string>>()
+    const seenOrganicHosts = new Set(items.map((item) => extractHost(item.link)).filter(Boolean))
+    const nonOfficialTitleRe = /(?:一覧|ランキング|おすすめ|比較|口コミ|まとめ|検索|予約|求人|採用|転職|会社データ|企業データ|業者を探す|選(?:！|!|\s|$)|best\s+\d+|top\s+\d+)/iu
+    stats.organicMaxPages = organicMaxPages
+
+    organicLoop: for (let page = 1; page <= organicMaxPages && items.length < resultLimit; page++) {
+      const activeQueries = organicQueries.filter((query) => !organicExhausted.has(query.key))
+      if (activeQueries.length === 0) break
+
+      for (let offset = 0; offset < activeQueries.length && items.length < resultLimit; offset += concurrency) {
+        if (!hasTimeForBatch()) {
+          searchTimeBudgetReached = true
+          break organicLoop
+        }
+        const batch = activeQueries.slice(offset, offset + concurrency)
+        const responses = await Promise.all(batch.map(async (query) => ({
+          query,
+          response: await fetchOrganicPage(query.query, page, params.apiKey),
+        })))
+        stats.queriesExecuted += batch.length
+        stats.organicQueriesExecuted += batch.length
+
+        for (const { query, response } of responses) {
+          if (response.error) {
+            stats.failedQueries++
+            stats.organicFailedQueries++
+            errors.push(response.error)
+            continue
+          }
+
+          const organic = response.organic ?? []
+          stats.rawCandidateCount += organic.length
+          stats.organicRawCandidateCount += organic.length
+          let newResultsOnPage = 0
+          const keywordSeen = organicSeenByKeyword.get(query.key) ?? new Set<string>()
+          organicSeenByKeyword.set(query.key, keywordSeen)
+
+          for (const result of organic) {
+            const normalizedUrl = normalizeCandidateUrl(result.link?.trim() ?? '')
+            if (!normalizedUrl) {
+              stats.organicRejectedCount++
+              continue
+            }
+            if (keywordSeen.has(normalizedUrl)) {
+              stats.paginationRepeatCount++
+              continue
+            }
+            keywordSeen.add(normalizedUrl)
+            newResultsOnPage++
+
+            const host = extractHost(normalizedUrl)
+            const blockedHost = !host || isNonProductionHost(host) || SKIP_DOMAINS.has(host)
+              || [...SKIP_DOMAINS].some((domain) => host.endsWith(`.${domain}`))
+            if (blockedHost || nonOfficialTitleRe.test(result.title ?? '')) {
+              stats.organicRejectedCount++
+              continue
+            }
+            if (seenUrls.has(normalizedUrl)) {
+              stats.duplicateCount++
+              continue
+            }
+            if (seenOrganicHosts.has(host)) {
+              stats.duplicateCount++
+              continue
+            }
+
+            seenUrls.add(normalizedUrl)
+            seenOrganicHosts.add(host)
+            items.push({
+              link: result.link ?? normalizedUrl,
+              title: result.title ?? '',
+              snippet: result.snippet ?? '',
+              keyword: query.keyword,
+              area: normalizedArea,
+              source: 'organic',
+              address: '',
+              phone: '',
+              category: '',
+              placeId: `organic:${normalizedUrl}`,
+            })
+            if (items.length >= resultLimit) break
+          }
+
+          const consecutiveEmpty = newResultsOnPage === 0
+            ? (organicZeroNewPages.get(query.key) ?? 0) + 1
+            : 0
+          organicZeroNewPages.set(query.key, consecutiveEmpty)
+          if (consecutiveEmpty >= 2) organicExhausted.add(query.key)
+        }
+
+        if (items.length < resultLimit) {
+          await new Promise((resolve) => setTimeout(resolve, 1_100))
+        }
+      }
+    }
+    stats.organicExhaustedQueryCount = organicExhausted.size
+    stats.organicPageCapReachedQueryCount = organicQueries
+      .filter((query) => !organicExhausted.has(query.key)).length
+  }
+
   const error = errors.length > 0 ? errors[0] : undefined
-  return { items, stats, ...(error && { error }) }
+  stats.candidateCount = items.length
+  stats.organicCandidateCount = Math.max(0, items.length - stats.placesCandidateCount)
+  stats.searchTimeBudgetReached = searchTimeBudgetReached
+  stats.searchElapsedMs = Date.now() - startedAt
+  return { items, stats, errors: errors.slice(0, 100), ...(error && { error }) }
 }

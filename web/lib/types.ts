@@ -22,11 +22,6 @@ export interface SearchTarget {
   areas?: string[]  // individual prefectures for multi-area runs (for accurate retry)
   keywords: string[]
   maxResults: number
-  // Radius (map-based) mode fields — optional, only set when searchMode = 'radius'
-  searchMode?: 'prefecture' | 'radius'
-  lat?: number
-  lng?: number
-  radiusKm?: number
 }
 
 export interface SearchRun {
@@ -74,6 +69,27 @@ export interface BenchmarkResults {
   areaRejectedCount?: number
   blockedDomainCount?: number
   duplicateCandidateCount?: number
+  rawCandidateCount?: number
+  uniquePlaceCount?: number
+  noWebsiteCount?: number
+  paginationRepeatCount?: number
+  exhaustedQueryCount?: number
+  pageCapReachedQueryCount?: number
+  maxPages?: number
+  hpFetchFailureCount?: number
+  placesCandidateCount?: number
+  organicCandidateCount?: number
+  organicRawCandidateCount?: number
+  organicRejectedCount?: number
+  organicQueriesExecuted?: number
+  organicFailedQueries?: number
+  organicExhaustedQueryCount?: number
+  organicPageCapReachedQueryCount?: number
+  organicMaxPages?: number
+  searchTimeBudgetReached?: boolean
+  searchElapsedMs?: number
+  relevanceReasonCounts?: Record<string, number>
+  warnings?: string[]
 }
 
 // ─── Project types ────────────────────────────────────────────
@@ -163,7 +179,6 @@ export interface N8nExecution {
   }
 }
 
-export type SearchMode = 'prefecture' | 'radius'
 export interface ExecuteParams {
   industry: string
   area: string
@@ -172,11 +187,6 @@ export interface ExecuteParams {
   maxResults?: number
   projectId: string
   runId: string
-  // Radius (map-based) mode
-  searchMode?: SearchMode
-  lat?: number
-  lng?: number
-  radiusKm?: number
 }
 
 export interface ApiResponse<T> {

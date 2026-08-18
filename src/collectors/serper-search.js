@@ -4,7 +4,10 @@ import { sleep } from '../utils/http-client.js'
 
 const SERPER_API_KEY = process.env.SERPER_API_KEY
 const REQUEST_DELAY = parseInt(process.env.REQUEST_DELAY_MS || '1100')
-const MAX_PAGES = 10
+const configuredMaxPages = parseInt(process.env.SERPER_MAX_PAGES || '50')
+const MAX_PAGES = Number.isFinite(configuredMaxPages)
+  ? Math.min(50, Math.max(1, configuredMaxPages))
+  : 50
 
 const BLOCKED_DOMAINS = [
   'jalan.net', 'tabelog.com', 'hotpepper.jp', 'ekiten.jp', 'navitime.co.jp',
@@ -12,7 +15,22 @@ const BLOCKED_DOMAINS = [
   'google.co.jp', 'facebook.com', 'instagram.com', 'twitter.com', 'x.com',
   'youtube.com', 'linkedin.com', 'tiktok.com', 'indeed.com', 'wantedly.com',
   'yahoo.co.jp', 'rakuten.co.jp', 'amazon.co.jp', 'minimo.io', 'epark.jp',
-  'baseconnect.in',
+  'baseconnect.in', 'ameblo.jp', 'note.com', 'lit.link', 'linktr.ee',
+  'beauty-navi.com', 'ozmall.co.jp', 'itp.ne.jp', 'job-medley.com',
+  'en-gage.net', 'doda.jp', 'openwork.jp', 'coubic.com', 'reserva.be',
+  'airrsv.net', 'b-merit.jp', 'select-type.com',
+  'prtimes.jp', 'imitsu.jp', 'initial.inc', 'buffett-code.com', 'compalyze.co.jp',
+  'ipros.com', 'bizreach.jp', 'talentsquare.co.jp', 'hrsquare.jp', 'batonz.jp',
+  'ma-search.com', 'jma-a.org', 'map.yahoo.co.jp', 'mapfan.com', 'loco.yahoo.co.jp',
+  'chosakun.com', 'nikkeibp.co.jp', 'fudousan.or.jp',
+  'bestsalonreport.jp', 'beauty-park.jp', 'minimodel.jp', 'cuts.jp',
+  'hairsalon-map.com', '9483.jp', 'kotomise.jp', 'repicolle.jp', 'pathee.com',
+  'hair-land.jp', 'e-shops.jp', 'athome.co.jp', 'bizloop.jp', 'tgnr.jp',
+  'yayoi-kk.co.jp', 'mid-tenshoku.com', 'inshokuten.com', 'kokoshiro.jp',
+  'tdb-publish.com', 'my.site.com', 'next-sfa.jp', 'ma-pro.com', 'ma-succeed.jp',
+  'maa-a.or.jp', 'ma-shoukei.com', 'tranbi.com', 'ma-japan.info',
+  'biz-maps.com', 'careercross.com',
+  'value-press.com', 'careerticket.jp', 'in-fra.jp', 'rocketreach.co', 'houjin.jp',
 ]
 
 const PREFECTURES = [
@@ -40,6 +58,7 @@ export async function searchBySerper(params) {
   const limit = Number(maxResults) > 0 ? Number(maxResults) : Number.POSITIVE_INFINITY
   const results = []
   const seenPlaces = new Set()
+  const seenPlacesByKeyword = new Map()
   const seenUrls = new Set()
   const exhausted = new Set()
   const zeroNewPages = new Map()
@@ -59,11 +78,18 @@ export async function searchBySerper(params) {
       }
 
       let newPlacesOnPage = 0
+      const keywordSeen = seenPlacesByKeyword.get(keyword) || new Set()
+      seenPlacesByKeyword.set(keyword, keywordSeen)
       for (const place of places) {
         const placeKey = place.placeId || place.cid || `${place.title || ''}|${place.address || ''}`
-        if (!placeKey || seenPlaces.has(placeKey)) continue
-        seenPlaces.add(placeKey)
+        if (!placeKey || keywordSeen.has(placeKey)) continue
+        keywordSeen.add(placeKey)
         newPlacesOnPage++
+
+        // Saturation is tracked independently for each keyword, while final
+        // output remains globally deduplicated across all keyword searches.
+        if (seenPlaces.has(placeKey)) continue
+        seenPlaces.add(placeKey)
 
         const url = place.website?.trim() || ''
         if (!url || !matchesArea(place.address || '', normalizedArea)) continue
@@ -88,7 +114,7 @@ export async function searchBySerper(params) {
 
       const emptyPages = newPlacesOnPage === 0 ? (zeroNewPages.get(keyword) || 0) + 1 : 0
       zeroNewPages.set(keyword, emptyPages)
-      if (places.length === 0 || emptyPages >= 2) exhausted.add(keyword)
+      if (emptyPages >= 2) exhausted.add(keyword)
       await sleep(REQUEST_DELAY)
     }
   }
@@ -130,7 +156,7 @@ function normalizeText(value) {
 }
 
 function matchesArea(address, area) {
-  const needle = normalizeText(area).replace(/(?:駅周辺|駅付近|周辺|付近)$/, '')
+  const needle = normalizeText(area)
   return Boolean(needle && normalizeText(address).includes(needle))
 }
 
@@ -138,6 +164,7 @@ function matchesIndustry(place, terms) {
   const evidence = normalizeText([
     place.title,
     place.type,
+    ...(Array.isArray(place.types) ? place.types : []),
     place.category,
     place.description,
   ].filter(Boolean).join(' '))
@@ -163,7 +190,8 @@ function normalizeUrl(url) {
 function isBlockedUrl(url) {
   try {
     const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '')
-    return BLOCKED_DOMAINS.some(domain => host === domain || host.endsWith(`.${domain}`))
+    return /^(?:test\d*|stg|staging|dev|demo|preview)$/.test(host.split('.')[0] || '')
+      || BLOCKED_DOMAINS.some(domain => host === domain || host.endsWith(`.${domain}`))
   } catch {
     return true
   }

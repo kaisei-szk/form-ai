@@ -21,11 +21,6 @@ const Schema = z.object({
   areas: z.array(z.string()).optional(),            // multi-area batch mode
   keywords: z.array(z.string()).optional(),
   maxResults: z.number().int().min(0).optional(),  // 0 = unlimited
-  // Radius (map-based) mode
-  searchMode: z.enum(['prefecture', 'radius']).optional(),
-  lat: z.number().optional(),
-  lng: z.number().optional(),
-  radiusKm: z.number().min(1).max(200).optional(),
 })
 
 /**
@@ -62,7 +57,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ── Batch mode: multiple prefectures → 1 parent + N child runs ──────────
-    const isBatch = execFields.areas && execFields.areas.length > 1 && execFields.searchMode !== 'radius'
+    const isBatch = execFields.areas && execFields.areas.length > 1
 
     if (isBatch) {
       const areas = execFields.areas!
@@ -168,7 +163,7 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    // ── Single-area (or radius) mode ────────────────────────────────────────
+    // ── Single-area mode ────────────────────────────────────────
     const params: ExecuteParams = {
       industry: execFields.industry,
       area: execFields.area,
@@ -176,15 +171,9 @@ export async function POST(req: NextRequest) {
       maxResults,
       projectId,
       runId,
-      ...(execFields.searchMode === 'radius' && {
-        searchMode: 'radius',
-        lat: execFields.lat,
-        lng: execFields.lng,
-        radiusKm: execFields.radiusKm,
-      }),
     }
 
-    // Register run in project (include radius fields so retry can reproduce exact conditions)
+    // Register the exact place-name search so retries reproduce the same area
     await addRunToProject(projectId, {
       id: runId,
       label,
@@ -193,12 +182,6 @@ export async function POST(req: NextRequest) {
         area: execFields.area,
         keywords,
         maxResults,
-        ...(execFields.searchMode === 'radius' && {
-          searchMode: 'radius' as const,
-          lat: execFields.lat,
-          lng: execFields.lng,
-          radiusKm: execFields.radiusKm,
-        }),
       },
     })
 

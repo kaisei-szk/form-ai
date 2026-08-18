@@ -7,9 +7,13 @@ import { z } from 'zod'
 import OpenAI from 'openai'
 import {
   evaluateCandidateRelevance,
+  isAddressInArea,
+  isDirectorySchemaTypes,
   type CandidateRelevanceDecision,
   type CandidateSource,
 } from '@/lib/search-relevance'
+
+export const maxDuration = 300
 
 // ── Global concurrency guard ───────────────────────────────────────
 // Allow at most MAX_CONCURRENT_BATCHES simultaneous scraping jobs to
@@ -246,7 +250,70 @@ export interface FormExtractResult {
   error: string | null
   homepageText?: string
   homepageTitle?: string
+  hasBusinessSchema?: boolean
+  hasDirectorySchema?: boolean
+  redirectedToNonOfficial?: boolean
   relevance?: CandidateRelevanceDecision
+}
+
+type JsonLdObject = Record<string, unknown>
+
+/** Parse JSON-LD graphs once into bounded object nodes for metadata checks. */
+function extractJsonLdObjects(html: string): JsonLdObject[] {
+  const objects: JsonLdObject[] = []
+  const jsonLdRe = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
+  let match: RegExpExecArray | null
+
+  const walk = (value: unknown, depth: number) => {
+    if (depth > 8 || objects.length >= 500 || value === null) return
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item, depth + 1)
+      return
+    }
+    if (typeof value !== 'object') return
+    const object = value as JsonLdObject
+    objects.push(object)
+    // Yoast and many Japanese CMSs put the actual Organization/LocalBusiness
+    // node under @graph. mainEntity/itemListElement cover other common graphs.
+    for (const key of ['@graph', 'mainEntity', 'itemListElement']) {
+      if (key in object) walk(object[key], depth + 1)
+    }
+  }
+
+  while ((match = jsonLdRe.exec(html)) !== null && objects.length < 500) {
+    try { walk(JSON.parse(match[1]), 0) } catch { /* malformed JSON-LD */ }
+  }
+  return objects
+}
+
+function schemaTypes(entry: JsonLdObject): string[] {
+  const raw = entry['@type']
+  const values = Array.isArray(raw) ? raw : [raw]
+  return values
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => value.split(/[\/#]/).pop()?.toLowerCase() ?? '')
+    .filter(Boolean)
+}
+
+function inspectStructuredPage(html: string): {
+  hasBusinessSchema: boolean
+  hasDirectorySchema: boolean
+} {
+  const types = extractJsonLdObjects(html).flatMap(schemaTypes)
+  return {
+    hasBusinessSchema: types.some((type) =>
+      type === 'organization'
+      || type === 'corporation'
+      || type === 'professionalservice'
+      || type === 'store'
+      || type === 'hairsalon'
+      || type.endsWith('business')
+    ),
+    // CollectionPage is used by ordinary WordPress/Yoast company homepages as
+    // well as directories. It is not directory proof by itself. ItemList and
+    // SearchResultsPage are the structural signals that justify exclusion.
+    hasDirectorySchema: isDirectorySchemaTypes(types),
+  }
 }
 
 /**
@@ -324,10 +391,12 @@ function fetchUrl(rawUrl: string, timeoutMs: number, _depth = 0): Promise<FetchR
       timeout: timeoutMs,
       agent: isHttps ? _httpsAgent : _httpAgent,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
         'Accept-Language': 'ja,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate, br',
+        // Identity encoding lets us safely retain and parse a bounded prefix
+        // when a generated page is exceptionally large.
+        'Accept-Encoding': 'identity',
         'Connection': 'keep-alive',
       },
     }
@@ -350,14 +419,12 @@ function fetchUrl(rawUrl: string, timeoutMs: number, _depth = 0): Promise<FetchR
 
         const chunks: Buffer[] = []
         let totalBytes = 0
-        // 200KB compressed — after decompression typically 600KB–1MB, sufficient for link scanning
-        const MAX_BYTES = 200_000
+        let responseFinished = false
+        const MAX_BYTES = 1_500_000
 
-        res.on('data', (chunk: Buffer) => {
-          totalBytes += chunk.length
-          if (totalBytes <= MAX_BYTES) { chunks.push(chunk) } else { res.destroy() }
-        })
-        res.on('end', () => {
+        const finishResponse = () => {
+          if (responseFinished) return
+          responseFinished = true
           clearTimeout(tid)
           const rawBuf = Buffer.concat(chunks)
           const contentEncoding = (res.headers['content-encoding'] || '').toLowerCase()
@@ -378,7 +445,9 @@ function fetchUrl(rawUrl: string, timeoutMs: number, _depth = 0): Promise<FetchR
                 } catch { /* ignore malformed meta refresh */ }
               }
             }
-            done({ url: rawUrl, finalUrl: rawUrl, html, error: null, statusCode: res.statusCode ?? null })
+            const statusCode = res.statusCode ?? null
+            const error = statusCode && statusCode >= 400 ? `http_${statusCode}` : null
+            done({ url: rawUrl, finalUrl: rawUrl, html, error, statusCode })
           }
           if (contentEncoding === 'gzip') {
             zlib.gunzip(rawBuf, (err, decoded) => processHtml(err ? rawBuf : decoded))
@@ -389,7 +458,21 @@ function fetchUrl(rawUrl: string, timeoutMs: number, _depth = 0): Promise<FetchR
           } else {
             processHtml(rawBuf)
           }
+        }
+
+        res.on('data', (chunk: Buffer) => {
+          const remaining = MAX_BYTES - totalBytes
+          if (remaining > 0) chunks.push(chunk.length <= remaining ? chunk : chunk.subarray(0, remaining))
+          totalBytes += Math.min(chunk.length, Math.max(remaining, 0))
+          if (totalBytes >= MAX_BYTES) {
+            // Parse the complete retained prefix instead of resolving through
+            // the response error emitted by destroy(). Head/nav/contact links
+            // and structured business data normally occur in this prefix.
+            finishResponse()
+            res.destroy()
+          }
         })
+        res.on('end', finishResponse)
         res.on('error', (e) => { clearTimeout(tid); done({ url: rawUrl, finalUrl: rawUrl, html: '', error: e.message, statusCode: null }) })
       })
 
@@ -402,6 +485,19 @@ function fetchUrl(rawUrl: string, timeoutMs: number, _depth = 0): Promise<FetchR
       done({ url: rawUrl, finalUrl: rawUrl, html: '', error: String(e), statusCode: null })
     }
   })
+}
+
+async function fetchUrlWithRetry(rawUrl: string, timeoutMs: number, maxAttempts = 2): Promise<FetchResult> {
+  let result = await fetchUrl(rawUrl, timeoutMs)
+  for (let attempt = 1; attempt < maxAttempts; attempt++) {
+    const transientStatus = result.statusCode === 408 || result.statusCode === 425 || result.statusCode === 429
+      || (result.statusCode !== null && result.statusCode >= 500)
+    const transientNetworkError = Boolean(result.error && result.statusCode === null)
+    if (!transientStatus && !transientNetworkError) break
+    await new Promise((resolve) => setTimeout(resolve, 300 * attempt + Math.floor(Math.random() * 150)))
+    result = await fetchUrl(rawUrl, timeoutMs)
+  }
+  return result
 }
 
 function stripHtmlTags(raw: string): string {
@@ -462,6 +558,12 @@ function extractTitle(html: string): string {
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
     .replace(/\s+/g, ' ').trim()
+}
+
+function extractMetaDescription(html: string): string {
+  const match = html.match(/<meta[^>]+(?:name|property)=["'](?:description|og:description)["'][^>]+content=["']([^"']+)["']/i)
+    || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+(?:name|property)=["'](?:description|og:description)["']/i)
+  return match?.[1] ? stripHtmlTags(match[1]) : ''
 }
 
 function extractForms(html: string, baseUrl: string): {
@@ -647,28 +749,23 @@ function extractForms(html: string, baseUrl: string): {
   let jsonLdEmail: string | null = null
   let jsonLdPhone: string | null = null
   let jsonLdAddress: string | null = null
-  const jsonLdRe = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
-  let jldMatch: RegExpExecArray | null
-  while ((jldMatch = jsonLdRe.exec(html)) !== null) {
+  for (const entry of extractJsonLdObjects(html)) {
     try {
-      const obj = JSON.parse(jldMatch[1])
-      const entries = Array.isArray(obj) ? obj : [obj]
-      for (const entry of entries) {
-        if (!jsonLdEmail && entry.email && typeof entry.email === 'string') jsonLdEmail = entry.email
-        if (!jsonLdPhone && entry.telephone && typeof entry.telephone === 'string') jsonLdPhone = entry.telephone
+        if (!jsonLdEmail && typeof entry.email === 'string') jsonLdEmail = entry.email
+        if (!jsonLdPhone && typeof entry.telephone === 'string') jsonLdPhone = entry.telephone
         // Address: can be a string or a PostalAddress object
         if (!jsonLdAddress && entry.address) {
           if (typeof entry.address === 'string') {
             jsonLdAddress = entry.address
           } else if (typeof entry.address === 'object') {
-            const a = entry.address
+            const a = entry.address as JsonLdObject
             // Build Japanese-style address: 〒postal prefecture city streetAddress
             const parts = [
-              a.postalCode ? `〒${a.postalCode.replace(/^〒/, '')}` : '',
-              a.addressRegion || '',
-              a.addressLocality || '',
-              a.streetAddress || '',
-            ].filter(Boolean)
+              typeof a.postalCode === 'string' ? `〒${a.postalCode.replace(/^〒/, '')}` : '',
+              typeof a.addressRegion === 'string' ? a.addressRegion : '',
+              typeof a.addressLocality === 'string' ? a.addressLocality : '',
+              typeof a.streetAddress === 'string' ? a.streetAddress : '',
+            ].filter((part): part is string => Boolean(part))
             if (parts.length > 0) jsonLdAddress = parts.join(' ')
           }
         }
@@ -677,14 +774,13 @@ function extractForms(html: string, baseUrl: string): {
         if (cp) {
           const cps = Array.isArray(cp) ? cp : [cp]
           for (const c of cps) {
-            if (!jsonLdEmail && c.email) jsonLdEmail = c.email
-            if (!jsonLdPhone && c.telephone) jsonLdPhone = c.telephone
+            if (!c || typeof c !== 'object') continue
+            const contact = c as JsonLdObject
+            if (!jsonLdEmail && typeof contact.email === 'string') jsonLdEmail = contact.email
+            if (!jsonLdPhone && typeof contact.telephone === 'string') jsonLdPhone = contact.telephone
           }
         }
-        if (jsonLdEmail && jsonLdPhone && jsonLdAddress) break
-      }
     } catch { /* malformed JSON-LD — skip */ }
-    if (jsonLdEmail && jsonLdPhone && jsonLdAddress) break
   }
 
   // ── Schema.org microdata extraction (itemprop) — fallback after JSON-LD ─────
@@ -724,25 +820,29 @@ function extractForms(html: string, baseUrl: string): {
   // Plain-text Japanese address fallback: 〒[postal] + prefecture + [city...].
   // Only used when structured-data extraction found nothing.
   if (!jsonLdAddress) {
-    // Normalize <br> variants to spaces so the regex can span line-break-separated addresses.
-    const htmlBrNorm = html.replace(/<br\s*\/?>/gi, ' ').replace(/\n+/g, ' ')
+    // Search visible text rather than raw HTML. Real address strings are often
+    // split across spans/divs; the old [^<] patterns stopped at the first tag.
+    const htmlBrNorm = stripHtmlTags(html.replace(/<br\s*\/?>/gi, ' '))
     // Pattern 1: 〒NNN-NNNN followed by characters that include a prefecture keyword
-    const postalAddrM = htmlBrNorm.match(/〒\s*(\d{3}[－\-]\d{4}|\d{7})\s*([^<]{5,80}(?:都|道|府|県)[^<]{0,60})/u)
+    const postalAddrM = htmlBrNorm.match(/〒\s*(\d{3}[－\-]\d{4}|\d{7})\s*(.{5,100}?(?:都|道|府|県).{0,80}?)(?=\s+(?:TEL|電話|FAX|アクセス|地図|Google|営業時間|代表者|設立|資本金|事業内容)|$)/u)
     if (postalAddrM) {
       const postalCode = postalAddrM[1].replace(/[－]/g, '-')
-      const addrRest = postalAddrM[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
-      jsonLdAddress = `〒${postalCode} ${addrRest}`.slice(0, 100)
+      const addrRest = postalAddrM[2].replace(/\s+/g, ' ').trim()
+      jsonLdAddress = `〒${postalCode} ${addrRest}`.slice(0, 160)
     } else {
       // Pattern 2: address label "所在地：" / "住所：" followed by Japanese address text
-      const addrLabelM = htmlBrNorm.match(/(?:所在地|住所|本社所在地|事務所|拠点|所在地・アクセス|address)[\s\u3000]*[：:]\s*([^<]{8,100}(?:都|道|府|県)[^<]{0,60})/iu)
+      const addrLabelM = htmlBrNorm.match(/(?:本社所在地|所在地・アクセス|所在地|住所|事務所|拠点|address)[\s\u3000]*[：:]\s*(.{5,140}?)(?=\s+(?:TEL|電話|FAX|アクセス|地図|Google|営業時間|代表者|設立|資本金|事業内容)|$)/iu)
       if (addrLabelM) {
-        jsonLdAddress = addrLabelM[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 100)
+        const candidate = addrLabelM[1].replace(/\s+/g, ' ').trim()
+        if (/(?:都|道|府|県|市|区|町|村)/u.test(candidate)) {
+          jsonLdAddress = candidate.slice(0, 140)
+        }
       } else {
         // Pattern 3: standalone prefecture + city (no postal code or label) — weakest signal
         // Only use when text clearly starts with a Japanese prefecture name (for precise matches)
-        const prefM = htmlBrNorm.match(/(?:^|>|\s)((?:北海道|東京都|大阪府|京都府|(?:青森|岩手|宮城|秋田|山形|福島|茨城|栃木|群馬|埼玉|千葉|神奈川|新潟|富山|石川|福井|山梨|長野|岐阜|静岡|愛知|三重|滋賀|兵庫|奈良|和歌山|鳥取|島根|岡山|広島|山口|徳島|香川|愛媛|高知|福岡|佐賀|長崎|熊本|大分|宮崎|鹿児島|沖縄)県)[^<]{5,60}(?:市|区|町|村|丁目|番地|番|号)[^<]{0,40})/u)
+        const prefM = htmlBrNorm.match(/(?:^|\s)((?:北海道|東京都|大阪府|京都府|(?:青森|岩手|宮城|秋田|山形|福島|茨城|栃木|群馬|埼玉|千葉|神奈川|新潟|富山|石川|福井|山梨|長野|岐阜|静岡|愛知|三重|滋賀|兵庫|奈良|和歌山|鳥取|島根|岡山|広島|山口|徳島|香川|愛媛|高知|福岡|佐賀|長崎|熊本|大分|宮崎|鹿児島|沖縄)県).{5,80}?(?:市|区|町|村|丁目|番地|番|号).{0,60}?)(?=\s+(?:TEL|電話|FAX|アクセス|地図|Google|営業時間|代表者|設立|資本金|事業内容)|$)/u)
         if (prefM?.[1]) {
-          jsonLdAddress = prefM[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 100)
+          jsonLdAddress = prefM[1].replace(/\s+/g, ' ').trim().slice(0, 160)
         }
       }
     }
@@ -919,7 +1019,15 @@ function extractForms(html: string, baseUrl: string): {
     formTypeHint = 'inquiry'
   }
 
-  return { formUrl, email, phone, address: jsonLdAddress, hasContactLink, hasInlineForm, hasEmailContact, formTypeHint, contactLinks: uniqueLinks.slice(0, 3) }
+  const cleanedAddress = jsonLdAddress
+    ? jsonLdAddress
+      .replace(/\s+/g, ' ')
+      .split(/\s+(?:TEL|電話(?:番号)?|FAX|メール|お問い合わせ先?|代表取締役|プライバシー|©|ホーム|事業内容|アクセスマップを見る)/iu)[0]
+      .trim()
+      .slice(0, 160)
+    : null
+
+  return { formUrl, email, phone, address: cleanedAddress, hasContactLink, hasInlineForm, hasEmailContact, formTypeHint, contactLinks: uniqueLinks.slice(0, 3) }
 }
 
 /**
@@ -1195,28 +1303,149 @@ const PROBE_PATHS = [
 ]
 const PROBE_LIMIT = 28  // covers URL-encoded Japanese paths, compound otoiawase-form variants, locale-prefixed paths
 
-async function processItem(
-  url: string,
+type EvidencePageKind = 'company' | 'service' | 'access'
+
+interface EvidencePageCandidate {
+  url: string
+  kind: EvidencePageKind
+  score: number
+}
+
+function extractEvidencePageCandidates(html: string, baseUrl: string): EvidencePageCandidate[] {
+  let base: URL
+  try { base = new URL(baseUrl) } catch { return [] }
+
+  const bestByKind = new Map<EvidencePageKind, EvidencePageCandidate>()
+  const anchorRe = /<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi
+  let match: RegExpExecArray | null
+
+  while ((match = anchorRe.exec(html)) !== null) {
+    let target: URL
+    try { target = new URL(match[1], base) } catch { continue }
+    if (!/^https?:$/.test(target.protocol) || target.origin !== base.origin) continue
+
+    target.hash = ''
+    const rawPath = (() => {
+      try { return decodeURIComponent(target.pathname) } catch { return target.pathname }
+    })().toLowerCase()
+    const text = stripHtmlTags(match[2]).normalize('NFKC').toLowerCase()
+    const signal = `${text} ${rawPath}`
+
+    if (/(?:news|blog|column|article|press|recruit|career|jobs?|privacy|terms|policy|sitemap|login|予約|採用|求人|ブログ|ニュース|お知らせ|プライバシー)/iu.test(signal)) continue
+
+    let kind: EvidencePageKind | null = null
+    let score = 0
+    if (/(?:会社概要|企業情報|法人概要|店舗情報|サロン情報|運営会社|company|corporate|about(?:\s*us)?|profile|outline|overview)/iu.test(signal)) {
+      kind = 'company'
+      score = 30
+    } else if (/(?:事業内容|業務内容|提供サービス|サービス内容|事業紹介|service|services|business|businesses|solutions?)/iu.test(signal)) {
+      kind = 'service'
+      score = 20
+    } else if (/(?:所在地|店舗一覧|アクセス|拠点|営業所|shop|shops|store|stores|location|locations|access)/iu.test(signal)) {
+      kind = 'access'
+      score = 10
+    }
+    if (!kind) continue
+
+    // Prefer concise first-party pages over deeply nested campaign pages.
+    score -= Math.max(0, target.pathname.split('/').filter(Boolean).length - 2)
+    const normalizedUrl = target.toString()
+    if (normalizedUrl === base.toString()) continue
+    const current = bestByKind.get(kind)
+    if (!current || score > current.score) bestByKind.set(kind, { url: normalizedUrl, kind, score })
+  }
+
+  return (['company', 'service', 'access'] as EvidencePageKind[])
+    .flatMap((kind) => bestByKind.get(kind) ?? [])
+    .slice(0, 2)
+}
+
+async function collectRelevanceEvidence(
+  homepageHtml: string,
   baseUrl: string,
+  timeoutMs: number,
+): Promise<{ text: string; titles: string[]; address: string | null; urls: string[] }> {
+  const candidates = extractEvidencePageCandidates(homepageHtml, baseUrl)
+  if (candidates.length === 0) return { text: '', titles: [], address: null, urls: [] }
+
+  const pages = await Promise.all(candidates.map(async (candidate) => ({
+    candidate,
+    // Evidence expansion is a fallback, so keep its latency strictly bounded.
+    // The main HP fetch already has retry handling.
+    fetched: await fetchUrl(candidate.url, Math.min(timeoutMs, 4_000)),
+  })))
+
+  const textParts: string[] = []
+  const titles: string[] = []
+  const urls: string[] = []
+  let address: string | null = null
+
+  for (const { candidate, fetched } of pages) {
+    if (fetched.error || !fetched.html || (fetched.statusCode !== null && fetched.statusCode >= 400)) continue
+    try {
+      const finalOrigin = new URL(fetched.finalUrl || candidate.url).origin
+      if (finalOrigin !== new URL(baseUrl).origin) continue
+    } catch { continue }
+
+    const title = extractTitle(fetched.html).slice(0, 300)
+    const headings = [...fetched.html.matchAll(/<h[1-3]\b[^>]*>([\s\S]*?)<\/h[1-3]>/gi)]
+      .map((heading) => stripHtmlTags(heading[1]))
+      .filter(Boolean)
+      .slice(0, 40)
+      .join(' ')
+    const pageText = [
+      title,
+      headings,
+      extractMetaDescription(fetched.html),
+      stripHtmlTags(fetched.html),
+    ].filter(Boolean).join(' ').slice(0, 50_000)
+    textParts.push(pageText)
+    if (title) titles.push(title)
+    urls.push(fetched.finalUrl || candidate.url)
+
+    if (!address) {
+      const extracted = extractForms(fetched.html, fetched.finalUrl || candidate.url)
+      if (extracted.address) address = extracted.address
+    }
+  }
+
+  return {
+    text: textParts.join(' ').slice(0, 120_000),
+    titles,
+    address,
+    urls,
+  }
+}
+
+async function processItem(
+  candidate: CandidateInput,
   timeoutMs: number,
   fetchFormPage: boolean
 ): Promise<FormExtractResult> {
+  const { url, baseUrl } = candidate
   // Step 1: fetch HP
-  const hpFetch = await fetchUrl(url, timeoutMs)
+  const hpFetch = await fetchUrlWithRetry(url, timeoutMs)
   if (hpFetch.error || !hpFetch.html) {
     return {
       url, baseUrl,
       formUrl: null, email: null, phone: null, address: null,
       hasContactLink: false, hasInlineForm: false, hasEmailContact: false,
       formTypeHint: null, contactLinks: [], formPageText: null, formPageTitle: null,
-      error: hpFetch.error,
+      error: hpFetch.error || 'empty_response',
     }
   }
 
   // Retain a bounded, cleaned homepage representation only for the relevance
   // gate that runs after this batch. It is removed before the API response.
-  const homepageText = cleanHtmlToText(hpFetch.html).slice(0, 20_000)
-  const homepageTitle = extractTitle(hpFetch.html).slice(0, 300)
+  // Relevance needs evidence from the whole company page, including footer
+  // addresses and meta descriptions. Form classification continues to use the
+  // focused 2,700-character cleanHtmlToText representation separately.
+  let homepageText = [extractMetaDescription(hpFetch.html), stripHtmlTags(hpFetch.html)]
+    .filter(Boolean)
+    .join(' ')
+    .slice(0, 50_000)
+  let homepageTitle = extractTitle(hpFetch.html).slice(0, 300)
+  const structuredPage = inspectStructuredPage(hpFetch.html)
 
   // Step 2: extract form links
   // Use finalUrl as the base for link resolution — handles http→https redirects and
@@ -1275,6 +1504,8 @@ async function processItem(
           formPageTitle: null,
           homepageText,
           homepageTitle,
+          ...structuredPage,
+          redirectedToNonOfficial: true,
           error: null,
         }
       }
@@ -1282,6 +1513,37 @@ async function processItem(
   }
 
   const extracted = extractForms(hpFetch.html, effectiveBase)
+
+  // The landing page often omits the legal address or exact business label.
+  // Before rejecting it, inspect at most two high-value company/service/access
+  // pages on the same origin. Search snippets and external pages are never evidence.
+  const preliminaryRelevance = evaluateCandidateRelevance({
+    url,
+    industry: candidate.industry,
+    keywords: candidate.keywords,
+    area: candidate.area,
+    searchArea: candidate.searchArea,
+    source: candidate.source as CandidateSource | undefined,
+    sourceTitle: candidate.sourceTitle,
+    sourceSnippet: candidate.sourceSnippet,
+    sourceAddress: candidate.sourceAddress,
+    sourceCategory: candidate.sourceCategory,
+    extractedAddress: extracted.address,
+    homepageTitle,
+    homepageText,
+    ...structuredPage,
+  })
+  if (preliminaryRelevance.status === 'rejected' && preliminaryRelevance.reasons.some((reason) =>
+    reason === 'missing_area_evidence'
+    || reason === 'area_mismatch'
+    || reason === 'missing_industry_evidence'
+    || reason === 'unverified_official_site'
+  )) {
+    const evidence = await collectRelevanceEvidence(hpFetch.html, effectiveBase, timeoutMs)
+    if (evidence.text) homepageText = `${homepageText} ${evidence.text}`.slice(0, 150_000)
+    if (evidence.titles.length > 0) homepageTitle = `${homepageTitle} ${evidence.titles.join(' ')}`.slice(0, 1_200)
+    if (!extracted.address && evidence.address) extracted.address = evidence.address
+  }
 
   const tryFetchAndValidate = async (targetUrl: string, cachedHtml: string | null): Promise<{ html: string; valid: boolean; finalUrl?: string } | null> => {
     try {
@@ -1365,7 +1627,7 @@ async function processItem(
     // Accept them directly — they were already classified as LINE by extractForms.
     if (LINE_URL_RE.test(extracted.formUrl)) {
       extracted.formTypeHint = 'LINE'
-      return { url, baseUrl, ...extracted, formPageText, formPageTitle, homepageText, homepageTitle, error: null }
+      return { url, baseUrl, ...extracted, formPageText, formPageTitle, homepageText, homepageTitle, ...structuredPage, error: null }
     }
 
     // If formUrl is the HP itself (inline form), reuse the already-fetched HTML
@@ -1448,7 +1710,7 @@ async function processItem(
   if (fetchFormPage && !extracted.hasContactLink) {
     let baseOrigin: string
     // Use the redirected URL's origin so probes resolve to the correct server (e.g. https after http→https redirect)
-    try { baseOrigin = new URL(effectiveBase).origin } catch { return { url, baseUrl, ...extracted, formPageText, formPageTitle, homepageText, homepageTitle, error: null } }
+    try { baseOrigin = new URL(effectiveBase).origin } catch { return { url, baseUrl, ...extracted, formPageText, formPageTitle, homepageText, homepageTitle, ...structuredPage, error: null } }
 
     const hpTitle = extractTitle(hpFetch.html).trim().toLowerCase()
     const hpLen = hpFetch.html.length
@@ -1632,7 +1894,7 @@ async function processItem(
     } catch { /* ignore */ }
   }
 
-  return { url, baseUrl, ...extracted, formPageText, formPageTitle, homepageText, homepageTitle, error: null }
+  return { url, baseUrl, ...extracted, formPageText, formPageTitle, homepageText, homepageTitle, ...structuredPage, error: null }
 }
 
 // ── GPT form-type classifier ───────────────────────────────────────────────────
@@ -1734,7 +1996,7 @@ async function processBatch(
 
       let promise = inFlight.get(item.url)
       if (!promise) {
-        promise = processItem(item.url, item.baseUrl, timeoutMs, fetchFormPage)
+        promise = processItem(item, timeoutMs, fetchFormPage)
         inFlight.set(item.url, promise)
       }
       results[i] = await promise
@@ -1794,6 +2056,9 @@ export async function POST(req: NextRequest) {
         extractedAddress: result.address,
         homepageTitle: result.homepageTitle,
         homepageText: result.homepageText,
+        hasBusinessSchema: result.hasBusinessSchema,
+        hasDirectorySchema: result.hasDirectorySchema,
+        redirectedToNonOfficial: result.redirectedToNonOfficial,
       })
       for (const reason of relevance.reasons) {
         relevanceReasonCounts[reason] = (relevanceReasonCounts[reason] ?? 0) + 1
@@ -1801,16 +2066,28 @@ export async function POST(req: NextRequest) {
       if (result.error) {
         relevanceReasonCounts.hp_fetch_failed = (relevanceReasonCounts.hp_fetch_failed ?? 0) + 1
       }
+      const strictArea = candidate.searchArea || candidate.area
+      const verifiedExtractedAddress = result.address && isAddressInArea(result.address, strictArea)
+        ? result.address
+        : null
+      const verifiedSourceAddress = candidate.sourceAddress && isAddressInArea(candidate.sourceAddress, strictArea)
+        ? candidate.sourceAddress
+        : null
       return {
         ...result,
         phone: result.phone || candidate.sourcePhone || null,
-        address: result.address || candidate.sourceAddress || null,
+        // Preserve the exact-area branch/listing address. A shared corporate
+        // site may expose only a head-office address in another prefecture.
+        address: verifiedExtractedAddress || verifiedSourceAddress || result.address || null,
         relevance,
       }
     })
 
+    // A temporary HP fetch failure must not erase an otherwise verified
+    // official business listing. Keep it as an HP-only result (no form) when
+    // Serper's address/category evidence passes the strict relevance gate.
     const admittedResults = evaluatedResults.filter((result) =>
-      result.error === null && result.relevance.status === 'accepted'
+      result.relevance.status === 'accepted'
     )
 
     // ── GPT classification pass ──────────────────────────────────────
@@ -1857,7 +2134,13 @@ export async function POST(req: NextRequest) {
 
     // Homepage text is internal evidence and can be large. Never return it to
     // n8n; retain only the compact decision and public extraction fields.
-    const responseResults = results.map(({ homepageText: _homepageText, homepageTitle: _homepageTitle, ...result }) => result)
+    const responseResults = results.map(({
+      homepageText: _homepageText,
+      homepageTitle: _homepageTitle,
+      hasBusinessSchema: _hasBusinessSchema,
+      hasDirectorySchema: _hasDirectorySchema,
+      ...result
+    }) => result)
 
     const successCount  = responseResults.filter((r) => r.error === null).length
     const formFoundCount = responseResults.filter((r) => r.hasContactLink).length
@@ -1874,6 +2157,21 @@ export async function POST(req: NextRequest) {
         relevanceAcceptedCount: responseResults.length,
         relevanceRejectedCount: items.length - responseResults.length,
         relevanceReasonCounts,
+        fetchErrorSamples: rawResults
+          .filter((result) => result.error)
+          .slice(0, 30)
+          .map((result) => ({ url: result.url, error: result.error })),
+        rejectionSamples: evaluatedResults
+          .flatMap((result, index) => result.relevance.status === 'rejected'
+            ? [{ result, candidate: items[index] }]
+            : [])
+          .slice(0, 50)
+          .map(({ result, candidate }) => ({
+            url: result.url,
+            source: candidate.source,
+            title: candidate.sourceTitle,
+            reasons: result.relevance.reasons,
+          })),
         successCount,
         errorCount: rawResults.filter((r) => r.error !== null).length,
         formFoundCount,
