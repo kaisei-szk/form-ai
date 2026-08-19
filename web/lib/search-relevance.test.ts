@@ -255,7 +255,7 @@ test('a verified listing without industry text is held, not rejected', () => {
   assert.ok(result.reasons.includes('missing_industry_evidence'))
 })
 
-test('listing phone matching the site phone accepts the candidate', () => {
+test('listing phone proves identity but does not replace industry evidence', () => {
   const result = evaluateCandidateRelevance({
     url: 'https://salon-z.example.jp/',
     industry: '美容室',
@@ -268,8 +268,60 @@ test('listing phone matching the site phone accepts the candidate', () => {
     extractedPhone: '0312345678',
     homepageTitle: 'サロンZ',
   })
-  assert.equal(result.status, 'accepted')
+  assert.equal(result.status, 'hold')
   assert.ok(result.evidence.includes('phone_match'))
+  assert.ok(result.reasons.includes('missing_industry_evidence'))
+})
+
+test('officiality, area and industry evidence can come from different pages', () => {
+  const result = evaluateCandidateRelevance({
+    url: 'https://sample.example.jp/sns/',
+    industry: 'SNS運用代行会社',
+    keywords: ['SNS運用代行会社', 'SNSマーケティング支援', 'アカウント運用支援'],
+    area: '渋谷区',
+    source: 'organic',
+    extractedAddress: '東京都渋谷区神南1-1-1',
+    homepageTitle: '株式会社サンプル｜SNSサービス',
+    homepageText: '会社概要 所在地 東京都渋谷区神南1-1-1 サービス内容 SNSマーケティング支援を提供しています。',
+    evidencePageKinds: ['company', 'service', 'access'],
+  })
+  assert.equal(result.status, 'accepted')
+  assert.equal(result.officialSite, true)
+  assert.equal(result.areaMatched, true)
+  assert.equal(result.industryMatched, true)
+})
+
+test('an independent store root can prove officiality with its own address', () => {
+  const result = evaluateCandidateRelevance({
+    url: 'https://hair-salon-x.example.jp/',
+    industry: '美容室',
+    keywords: ['美容室', 'ヘアサロン'],
+    area: '渋谷区',
+    source: 'organic',
+    extractedAddress: '東京都渋谷区神宮前1-1-1',
+    homepageTitle: 'HAIR SALON X',
+    homepageText: 'HAIR SALON X ヘアサロン カット カラー 所在地 東京都渋谷区神宮前1-1-1',
+  })
+  assert.equal(result.status, 'accepted')
+  assert.equal(result.officialSite, true)
+})
+
+test('an official company remains on hold when only area or industry is missing', () => {
+  const result = evaluateCandidateRelevance({
+    url: 'https://sample.example.jp/',
+    industry: 'SNS運用代行会社',
+    keywords: ['SNS運用代行会社'],
+    area: '渋谷区',
+    source: 'organic',
+    homepageTitle: '株式会社サンプル',
+    homepageText: '会社概要 代表取締役 山田太郎 資本金1000万円',
+    hasBusinessSchema: true,
+  })
+  assert.equal(result.status, 'hold')
+  assert.equal(result.officialSite, true)
+  assert.ok(result.reasons.includes('missing_area_evidence'))
+  assert.ok(result.reasons.includes('missing_industry_evidence'))
+  assert.ok(!result.reasons.includes('unverified_official_site'))
 })
 
 test('service-area claims alone are not treated as a location', () => {

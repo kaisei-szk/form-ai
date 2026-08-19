@@ -167,17 +167,20 @@ export default function ExecutePanel() {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  // Fetch AI keyword suggestions whenever the industry or area changes (debounced 600ms)
+  // Build editable discovery terms before execution. Area changes must not
+  // overwrite terms that the user has already reviewed or edited.
   useEffect(() => {
     if (!actualIndustry) return
     setKeywords([actualIndustry])
     setKeywordsLoading(true)
+    const controller = new AbortController()
     const t = setTimeout(async () => {
       try {
         const res = await fetch('/api/ai/keywords', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ industry: actualIndustry, area: areaInput.trim() || undefined }),
+          body: JSON.stringify({ industry: actualIndustry }),
+          signal: controller.signal,
         })
         const data = await res.json()
         if (data.success) {
@@ -191,9 +194,9 @@ export default function ExecutePanel() {
         setKeywordsLoading(false)
       }
     }, 600)
-    return () => { clearTimeout(t); setKeywordsLoading(false) }
+    return () => { clearTimeout(t); controller.abort(); setKeywordsLoading(false) }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [actualIndustry, areaInput])
+  }, [actualIndustry])
 
   // Close preset dropdown on outside click
   useEffect(() => {
@@ -751,7 +754,7 @@ export default function ExecutePanel() {
         <div className="flex items-center justify-between mb-1">
           <label className="text-xs text-gray-500 flex items-center gap-1">
             <Sparkles className="w-3 h-3" />
-            検索キーワード
+            一緒に検索する候補
           </label>
           {keywordsLoading
             ? <span className="text-xs text-blue-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" />AI生成中...</span>
@@ -760,9 +763,9 @@ export default function ExecutePanel() {
         </div>
         <div className={`flex flex-wrap gap-1 min-h-[34px] bg-white border rounded px-2 py-1.5 transition-colors ${isRunning ? 'border-gray-200 opacity-60' : 'border-gray-300'}`}>
           {keywords.map((kw) => (
-            <span key={kw} className="inline-flex items-center gap-0.5 bg-blue-50 text-blue-700 text-xs px-2 py-0.5 rounded border border-blue-100">
+            <span key={kw} className={`inline-flex items-center gap-0.5 text-xs px-2 py-0.5 rounded border ${kw === actualIndustry ? 'bg-blue-50 text-blue-700 border-blue-100' : 'bg-violet-50 text-violet-700 border-violet-100'}`}>
               {kw}
-              {!isRunning && (
+              {!isRunning && !keywordsLoading && (
                 <button
                   onClick={() => setKeywords((prev) => prev.filter((k) => k !== kw))}
                   className="hover:text-blue-900 ml-0.5"
@@ -772,7 +775,7 @@ export default function ExecutePanel() {
               )}
             </span>
           ))}
-          {!isRunning && (
+          {!isRunning && !keywordsLoading && (
             <input
               value={kwInput}
               onChange={(e) => setKwInput(e.target.value)}
@@ -792,7 +795,9 @@ export default function ExecutePanel() {
             />
           )}
         </div>
-        <p className="text-xs text-gray-400 mt-0.5">業種・エリア変更で自動再生成 · Enterで追加 · ×で削除</p>
+        <p className="text-xs text-gray-500 mt-1">
+          業種を同義語・サービス表現へ分解した候補です。これらも一緒に調べますか？ 確定した候補だけで検索します。Enterで追加・×で削除できます。
+        </p>
       </div>
 
       {/* Search provider is intentionally fixed to Serper. */}

@@ -21,6 +21,8 @@ export interface CandidateRelevanceInput {
   hasBusinessSchema?: boolean
   hasDirectorySchema?: boolean
   redirectedToNonOfficial?: boolean
+  /** Same-origin pages inspected in addition to the landing page. */
+  evidencePageKinds?: Array<'company' | 'service' | 'access'>
 }
 
 export type CandidateRejectionReason =
@@ -209,7 +211,7 @@ function isLikelyOfficialCorporatePage(rawUrl: string): boolean {
 function isLikelyNonOfficialContentPage(rawUrl: string): boolean {
   try {
     const path = decodeURIComponent(new URL(rawUrl).pathname).toLowerCase()
-    return /\/(?:press(?:release)?|news|posts?|articles?|columns?|blogs?|jobs?|careers?|professional|companies|item)(?:\/|$)/u.test(path)
+    return /\/(?:press(?:release)?|news|posts?|articles?|columns?|blogs?|jobs?|careers?|professional|companies|item|cases?|case-study|works?|portfolio|interviews?)(?:\/|$)/u.test(path)
   } catch {
     return true
   }
@@ -272,6 +274,24 @@ function phonesMatch(a: string | undefined, b: string | null | undefined): boole
 }
 
 /**
+ * First-party identity must be decided independently from area and industry.
+ * A company name in the title or multiple corporate-profile labels are useful
+ * identity signals; neither requires the target address or service to appear on
+ * the same page.
+ */
+function containsFirstPartyIdentityEvidence(title: string, text: string): boolean {
+  const titleHasEntityName = /(?:株式会社|有限会社|合同会社|合資会社|一般社団法人|一般財団法人|税理士法人|弁護士法人|行政書士法人|司法書士法人|医療法人|社会福祉法人|\b(?:inc\.?|corp\.?|corporation|ltd\.?|llc)\b)/iu.test(title)
+  const normalizedText = text.normalize('NFKC')
+  const corporateLabels = [
+    /会社概要|企業情報|法人概要|店舗概要|サロン概要/u,
+    /事業内容|業務内容|提供サービス/u,
+    /所在地|本社所在地|本店所在地|店舗所在地/u,
+    /代表者|代表取締役|設立|資本金/u,
+  ].filter((pattern) => pattern.test(normalizedText)).length
+  return titleHasEntityName || corporateLabels >= 2
+}
+
+/**
  * ページ本文中の地区名が「所在地」を示す文脈かを判定する。
  * 「渋谷区対応」「渋谷区のおすすめ」のような対応エリア・紹介記事表現は
  * 所在地の証拠として扱わない（精度目標.md 地区判定）。
@@ -325,6 +345,7 @@ export function evaluateCandidateRelevance(
 
   const strictArea = input.searchArea || input.area
   const listedSource = input.source === 'places' || input.source === 'portal'
+  const evidencePageKinds = new Set(input.evidencePageKinds ?? [])
   const reasons: CandidateRejectionReason[] = []
   const evidence: string[] = []
 
@@ -358,13 +379,15 @@ export function evaluateCandidateRelevance(
     return stem.length >= 2 && stem !== term ? [term, stem] : [term]
   }))]
   const terms = expandIndustryTerms(stemmedTerms)
-  const listingIndustryEvidence = [input.sourceTitle, input.sourceCategory]
+  const listingIndustryEvidence = listedSource ? [input.sourceTitle, input.sourceCategory]
     .filter(Boolean)
-    .join(' ')
+    .join(' ') : ''
   const listingMatch = containsIndustryEvidence(listingIndustryEvidence, terms)
   const titleMatch = containsIndustryEvidence(input.homepageTitle ?? '', terms)
   const selfDeclared = !input.hasDirectorySchema
-    && isLikelyOfficialCorporatePage(input.url)
+    && (isLikelyOfficialCorporatePage(input.url)
+      || evidencePageKinds.has('company')
+      || evidencePageKinds.has('service'))
     && containsSelfDeclaredIndustryEvidence(input.homepageText ?? '', terms)
   const bodyMention = containsIndustryEvidence(input.homepageText ?? '', terms)
   const negativeIndustry = containsNegativeIndustryEvidence(input.homepageText ?? '', terms)
@@ -390,10 +413,18 @@ export function evaluateCandidateRelevance(
     + (input.hasBusinessSchema ? 1 : 0)
     + (listedSource ? 2 : 0)
 
-  // organic は検索順位だけを公式の証拠にしない。サイト内住所と業種整合の
-  // 両方が揃ったときのみ独立に公式と裏づけられたとみなす。
-  const organicCorroborated = addressInArea && industryMatched
-  const officialSite = !officialContradiction && (listedSource || organicCorroborated)
+  // 公式性は地区・業種とは独立して判定する。住所は会社概要、業種は
+  // サービスページというように証拠が別ページへ分かれる通常の企業サイトを
+  // 「非公式」と誤判定しないため。
+  const firstPartyIdentity = Boolean(input.hasBusinessSchema)
+    || evidencePageKinds.has('company')
+    || (isLikelyOfficialCorporatePage(input.url)
+      && Boolean(input.extractedAddress || input.extractedPhone))
+    || containsFirstPartyIdentityEvidence(input.homepageTitle ?? '', input.homepageText ?? '')
+  const listedIdentity = input.source === 'places'
+    || (input.source === 'portal' && (nameMatch || phoneMatch || firstPartyIdentity))
+  const officialSite = !officialContradiction && (listedIdentity || (!listedSource && firstPartyIdentity))
+  if (officialSite) evidence.push('official_identity_match')
 
   // ── 明確な矛盾 → 除外 ────────────────────────────────
   if (officialContradiction) reasons.push('unverified_official_site')
@@ -404,11 +435,7 @@ export function evaluateCandidateRelevance(
   }
 
   // ── 採用可能な組み合わせ（加点方式） ──────────────────
-  const accepted =
-    (listedSource && addressInArea && industryMatched)
-    || (listedSource && addressInArea && nameMatch && industryLevel >= 1)
-    || (listedSource && addressInArea && phoneMatch)
-    || (!listedSource && organicCorroborated)
+  const accepted = officialSite && areaMatched && industryMatched
   if (accepted) {
     return { status: 'accepted', reasons: [], areaMatched, industryMatched, officialSite, score, evidence }
   }
@@ -416,7 +443,7 @@ export function evaluateCandidateRelevance(
   // ── 情報不足 → 保留（追加確認へ） ────────────────────
   if (!areaMatched) reasons.push('missing_area_evidence')
   if (!industryMatched) reasons.push('missing_industry_evidence')
-  if (!listedSource && !organicCorroborated) reasons.push('unverified_official_site')
+  if (!officialSite) reasons.push('unverified_official_site')
   if (reasons.length === 0) reasons.push('insufficient_evidence')
   return { status: 'hold', reasons, areaMatched, industryMatched, officialSite, score, evidence }
 }

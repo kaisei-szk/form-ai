@@ -253,6 +253,7 @@ export interface FormExtractResult {
   hasBusinessSchema?: boolean
   hasDirectorySchema?: boolean
   redirectedToNonOfficial?: boolean
+  evidencePageKinds?: EvidencePageKind[]
   relevance?: CandidateRelevanceDecision
 }
 
@@ -1357,16 +1358,26 @@ function extractEvidencePageCandidates(html: string, baseUrl: string): EvidenceP
 
   return (['company', 'service', 'access'] as EvidencePageKind[])
     .flatMap((kind) => bestByKind.get(kind) ?? [])
-    .slice(0, 2)
+    .slice(0, 3)
 }
 
 async function collectRelevanceEvidence(
   homepageHtml: string,
   baseUrl: string,
   timeoutMs: number,
-): Promise<{ text: string; titles: string[]; address: string | null; urls: string[] }> {
+): Promise<{
+  text: string
+  titles: string[]
+  address: string | null
+  phone: string | null
+  urls: string[]
+  kinds: EvidencePageKind[]
+  hasBusinessSchema: boolean
+}> {
   const candidates = extractEvidencePageCandidates(homepageHtml, baseUrl)
-  if (candidates.length === 0) return { text: '', titles: [], address: null, urls: [] }
+  if (candidates.length === 0) {
+    return { text: '', titles: [], address: null, phone: null, urls: [], kinds: [], hasBusinessSchema: false }
+  }
 
   const pages = await Promise.all(candidates.map(async (candidate) => ({
     candidate,
@@ -1378,7 +1389,10 @@ async function collectRelevanceEvidence(
   const textParts: string[] = []
   const titles: string[] = []
   const urls: string[] = []
-  let address: string | null = null
+  const addresses: string[] = []
+  const phones: string[] = []
+  const kinds: EvidencePageKind[] = []
+  let hasBusinessSchema = false
 
   for (const { candidate, fetched } of pages) {
     if (fetched.error || !fetched.html || (fetched.statusCode !== null && fetched.statusCode >= 400)) continue
@@ -1402,18 +1416,24 @@ async function collectRelevanceEvidence(
     textParts.push(pageText)
     if (title) titles.push(title)
     urls.push(fetched.finalUrl || candidate.url)
+    kinds.push(candidate.kind)
+    hasBusinessSchema ||= inspectStructuredPage(fetched.html).hasBusinessSchema
 
-    if (!address) {
-      const extracted = extractForms(fetched.html, fetched.finalUrl || candidate.url)
-      if (extracted.address) address = extracted.address
-    }
+    const extracted = extractForms(fetched.html, fetched.finalUrl || candidate.url)
+    if (extracted.address && !addresses.includes(extracted.address)) addresses.push(extracted.address)
+    if (extracted.phone && !phones.includes(extracted.phone)) phones.push(extracted.phone)
   }
 
   return {
     text: textParts.join(' ').slice(0, 120_000),
     titles,
-    address,
+    // Keep every discovered location so a target-area branch is not hidden by
+    // the head-office address appearing first on another page.
+    address: addresses.length > 0 ? addresses.join(' / ') : null,
+    phone: phones[0] ?? null,
     urls,
+    kinds: [...new Set(kinds)],
+    hasBusinessSchema,
   }
 }
 
@@ -1446,6 +1466,7 @@ async function processItem(
     .slice(0, 50_000)
   let homepageTitle = extractTitle(hpFetch.html).slice(0, 300)
   const structuredPage = inspectStructuredPage(hpFetch.html)
+  let evidencePageKinds: EvidencePageKind[] = []
 
   // Step 2: extract form links
   // Use finalUrl as the base for link resolution — handles http→https redirects and
@@ -1545,7 +1566,15 @@ async function processItem(
     const evidence = await collectRelevanceEvidence(hpFetch.html, effectiveBase, timeoutMs)
     if (evidence.text) homepageText = `${homepageText} ${evidence.text}`.slice(0, 150_000)
     if (evidence.titles.length > 0) homepageTitle = `${homepageTitle} ${evidence.titles.join(' ')}`.slice(0, 1_200)
-    if (!extracted.address && evidence.address) extracted.address = evidence.address
+    if (evidence.address) {
+      extracted.address = [extracted.address, evidence.address]
+        .filter((value): value is string => Boolean(value))
+        .filter((value, index, values) => values.indexOf(value) === index)
+        .join(' / ')
+    }
+    if (!extracted.phone && evidence.phone) extracted.phone = evidence.phone
+    structuredPage.hasBusinessSchema ||= evidence.hasBusinessSchema
+    evidencePageKinds = evidence.kinds
   }
 
   const tryFetchAndValidate = async (targetUrl: string, cachedHtml: string | null): Promise<{ html: string; valid: boolean; finalUrl?: string } | null> => {
@@ -1630,7 +1659,7 @@ async function processItem(
     // Accept them directly — they were already classified as LINE by extractForms.
     if (LINE_URL_RE.test(extracted.formUrl)) {
       extracted.formTypeHint = 'LINE'
-      return { url, baseUrl, ...extracted, formPageText, formPageTitle, homepageText, homepageTitle, ...structuredPage, error: null }
+      return { url, baseUrl, ...extracted, formPageText, formPageTitle, homepageText, homepageTitle, ...structuredPage, evidencePageKinds, error: null }
     }
 
     // If formUrl is the HP itself (inline form), reuse the already-fetched HTML
@@ -1713,7 +1742,7 @@ async function processItem(
   if (fetchFormPage && !extracted.hasContactLink) {
     let baseOrigin: string
     // Use the redirected URL's origin so probes resolve to the correct server (e.g. https after http→https redirect)
-    try { baseOrigin = new URL(effectiveBase).origin } catch { return { url, baseUrl, ...extracted, formPageText, formPageTitle, homepageText, homepageTitle, ...structuredPage, error: null } }
+    try { baseOrigin = new URL(effectiveBase).origin } catch { return { url, baseUrl, ...extracted, formPageText, formPageTitle, homepageText, homepageTitle, ...structuredPage, evidencePageKinds, error: null } }
 
     const hpTitle = extractTitle(hpFetch.html).trim().toLowerCase()
     const hpLen = hpFetch.html.length
@@ -1897,7 +1926,7 @@ async function processItem(
     } catch { /* ignore */ }
   }
 
-  return { url, baseUrl, ...extracted, formPageText, formPageTitle, homepageText, homepageTitle, ...structuredPage, error: null }
+  return { url, baseUrl, ...extracted, formPageText, formPageTitle, homepageText, homepageTitle, ...structuredPage, evidencePageKinds, error: null }
 }
 
 // ── GPT form-type classifier ───────────────────────────────────────────────────
@@ -2064,6 +2093,7 @@ export async function POST(req: NextRequest) {
         hasBusinessSchema: result.hasBusinessSchema,
         hasDirectorySchema: result.hasDirectorySchema,
         redirectedToNonOfficial: result.redirectedToNonOfficial,
+        evidencePageKinds: result.evidencePageKinds,
       })
       for (const reason of relevance.reasons) {
         relevanceReasonCounts[reason] = (relevanceReasonCounts[reason] ?? 0) + 1
@@ -2144,6 +2174,7 @@ export async function POST(req: NextRequest) {
       homepageTitle: _homepageTitle,
       hasBusinessSchema: _hasBusinessSchema,
       hasDirectorySchema: _hasDirectorySchema,
+      evidencePageKinds: _evidencePageKinds,
       ...result
     }) => result)
 
