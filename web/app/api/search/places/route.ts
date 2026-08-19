@@ -6,7 +6,8 @@ export const maxDuration = 300
 const Schema = z.object({
   keywords:   z.array(z.string()).min(1),
   area:       z.string().min(1),
-  maxResults: z.number().int().min(0).default(0),  // 0 = unlimited
+  maxResults: z.number().int().min(0).default(1000),
+  searchRadiusKm: z.number().min(1).max(50).optional(),
 })
 
 // 都道府県→市区町村展開（serper/route.ts と同じマップ）
@@ -163,38 +164,137 @@ type PlacesResult = {
   placeId: string
 }
 
-// Places API (New) Text Search
-// $0.032/リクエスト、最大20件/リクエスト、nextPageToken でページネーション
+type LatLng = { latitude: number; longitude: number }
+type SearchRectangle = { low: LatLng; high: LatLng }
+
+class PlacesSearchError extends Error {
+  constructor(message: string, readonly requestCount: number) {
+    super(message)
+    this.name = 'PlacesSearchError'
+  }
+}
+
+const KNOWN_STATIONS: Record<string, LatLng> = {
+  '新宿駅': { latitude: 35.690921, longitude: 139.700258 },
+  '渋谷駅': { latitude: 35.658034, longitude: 139.701636 },
+}
+
+const CATEGORY_EXPANSIONS: Record<string, string[]> = {
+  'サロン': [
+    'サロン', '美容室', 'ヘアサロン', 'エステサロン', 'ネイルサロン',
+    'まつげサロン', '脱毛サロン', 'リラクゼーションサロン',
+  ],
+  '美容クリニック': [
+    '美容クリニック', '美容外科', '美容皮膚科', '医療脱毛',
+    '美容医療', 'スキンクリニック', 'AGAクリニック',
+  ],
+}
+
+function expandKeywords(keywords: string[]): string[] {
+  const expanded = keywords.flatMap((keyword) => CATEGORY_EXPANSIONS[keyword] ?? [keyword])
+  return [...new Set(expanded.map((keyword) => keyword.trim()).filter(Boolean))]
+}
+
+async function resolveCenter(area: string, apiKey: string): Promise<LatLng> {
+  if (KNOWN_STATIONS[area]) return KNOWN_STATIONS[area]
+
+  const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': apiKey,
+      'X-Goog-FieldMask': 'places.id,places.location',
+    },
+    body: JSON.stringify({
+      textQuery: area,
+      languageCode: 'ja',
+      regionCode: 'JP',
+      pageSize: 1,
+    }),
+    signal: AbortSignal.timeout(20_000),
+  })
+
+  if (!res.ok) {
+    throw new Error(`検索中心の取得に失敗しました: ${res.status}`)
+  }
+
+  const data = await res.json() as { places?: { location?: LatLng }[] }
+  const location = data.places?.[0]?.location
+  if (!location) throw new Error(`「${area}」の位置をGoogle Mapsで特定できませんでした`)
+  return location
+}
+
+function createGrid(center: LatLng, radiusKm: number, gridSize: number): SearchRectangle[] {
+  const latRadius = radiusKm / 111.32
+  const lonRadius = radiusKm / (111.32 * Math.cos(center.latitude * Math.PI / 180))
+  const latStep = (latRadius * 2) / gridSize
+  const lonStep = (lonRadius * 2) / gridSize
+  const cells: Array<SearchRectangle & { distance: number }> = []
+  const middle = (gridSize - 1) / 2
+
+  for (let row = 0; row < gridSize; row++) {
+    for (let col = 0; col < gridSize; col++) {
+      cells.push({
+        low: {
+          latitude: center.latitude - latRadius + latStep * row,
+          longitude: center.longitude - lonRadius + lonStep * col,
+        },
+        high: {
+          latitude: center.latitude - latRadius + latStep * (row + 1),
+          longitude: center.longitude - lonRadius + lonStep * (col + 1),
+        },
+        distance: Math.hypot(row - middle, col - middle),
+      })
+    }
+  }
+
+  return cells
+    .sort((a, b) => a.distance - b.distance)
+    .map(({ low, high }) => ({ low, high }))
+}
+
+// Places API (New) Text Search: 20件/ページ。範囲分割により上位結果の
+// 取りこぼしを抑え、nextPageToken がある限り最大3ページ取得する。
 async function searchPlaces(
   query: string,
   apiKey: string,
-  maxItems: number,
-): Promise<PlacesResult[]> {
+  rectangle?: SearchRectangle,
+  maxPages = 3,
+): Promise<{ items: PlacesResult[]; requestCount: number }> {
   const results: PlacesResult[] = []
   let pageToken: string | undefined
+  let requestCount = 0
 
-  while (results.length < maxItems || maxItems === 0) {
+  for (let page = 0; page < maxPages; page++) {
     const body: Record<string, unknown> = {
       textQuery: query,
       languageCode: 'ja',
       regionCode: 'JP',
-      maxResultCount: 20,
+      pageSize: 20,
     }
     if (pageToken) body.pageToken = pageToken
+    if (rectangle) {
+      body.locationRestriction = { rectangle }
+    }
 
     const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': apiKey,
-        'X-Goog-FieldMask': 'places.id,places.displayName,places.websiteUri,places.nationalPhoneNumber,places.formattedAddress,places.nextPageToken',
+        'X-Goog-FieldMask': 'places.id,places.displayName,places.websiteUri,places.nationalPhoneNumber,places.formattedAddress,nextPageToken',
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
     })
+    requestCount++
 
     if (!res.ok) {
-      const text = await res.text()
-      throw new Error(`Places API error: ${res.status} ${text}`)
+      const payload = await res.json().catch(() => null) as {
+        error?: { message?: string; status?: string }
+      } | null
+      const message = payload?.error?.message ?? payload?.error?.status ?? res.statusText
+      throw new PlacesSearchError(`Google Maps API (${res.status}): ${message}`, requestCount)
     }
 
     const data = await res.json() as {
@@ -223,10 +323,9 @@ async function searchPlaces(
 
     pageToken = data.nextPageToken
     if (!pageToken || places.length === 0) break
-    if (maxItems > 0 && results.length >= maxItems) break
   }
 
-  return results
+  return { items: results, requestCount }
 }
 
 export async function POST(req: NextRequest) {
@@ -237,61 +336,114 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'GOOGLE_MAPS_API_KEY not configured' }, { status: 500 })
     }
 
-    const subAreas = expandArea(body.area)
-    const isUnlimited = body.maxResults === 0
+    const targetResults = body.maxResults === 0 ? 1000 : body.maxResults
+    const keywords = expandKeywords(body.keywords)
 
-    // エリアあたりの上限: 無制限なら各エリア60件（3ページ）、制限ありなら按分
-    const perAreaLimit = isUnlimited ? 60 : Math.ceil(body.maxResults / subAreas.length / body.keywords.length)
-
-    // 全クエリを生成（キーワード×サブエリア）
-    type Job = { kw: string; subArea: string; query: string }
+    type Job = { kw: string; subArea: string; query: string; rectangle?: SearchRectangle }
     const jobs: Job[] = []
-    for (const kw of body.keywords) {
+
+    let gridCellCount = 0
+    let searchRadiusKm = 0
+
+    if (isPrefecture(body.area)) {
+      const subAreas = expandArea(body.area)
       for (const subArea of subAreas) {
-        jobs.push({ kw, subArea, query: `${kw} ${subArea}` })
+        for (const kw of keywords) {
+          jobs.push({ kw, subArea, query: `${kw} ${subArea}` })
+        }
+      }
+    } else {
+      const center = await resolveCenter(body.area, apiKey)
+      searchRadiusKm = body.searchRadiusKm ?? (body.area.endsWith('駅') ? 20 : 15)
+      const gridSize = targetResults >= 1000 ? 9 : targetResults >= 500 ? 7 : 5
+      const cells = createGrid(center, searchRadiusKm, gridSize)
+      gridCellCount = cells.length
+      for (const rectangle of cells) {
+        for (const kw of keywords) {
+          jobs.push({ kw, subArea: body.area, query: kw, rectangle })
+        }
       }
     }
 
-    // concurrency=10 で並列実行（Places APIはSerperより重いので少なめ）
-    const CONCURRENCY = 10
-    const seen = new Set<string>()  // placeId dedup
-    const seenHost = new Set<string>()  // URL dedup
+    // 中心セルから外側へ検索し、目標HP件数に到達した時点で停止する。
+    const CONCURRENCY = 6
+    const MAX_PAGES = targetResults >= 500 ? 3 : targetResults >= 100 ? 2 : 1
+    const REQUEST_BUDGET = Math.min(450, Math.max(6, Math.ceil(targetResults * 0.45)))
+    const seen = new Set<string>()
+    const seenHost = new Set<string>()
     const allResults: PlacesResult[] = []
+    let rawPlaceCount = 0
+    let requestCount = 0
+    let jobsExecuted = 0
+    const searchErrors: string[] = []
 
     for (let i = 0; i < jobs.length; i += CONCURRENCY) {
-      const batch = jobs.slice(i, i + CONCURRENCY)
+      if (allResults.length >= targetResults || requestCount >= REQUEST_BUDGET) break
+      // Each job can use multiple pages. Keep the final batch inside the
+      // configured request budget to cap cost.
+      const remainingJobSlots = Math.floor((REQUEST_BUDGET - requestCount) / MAX_PAGES)
+      if (remainingJobSlots < 1) break
+      const batch = jobs.slice(i, i + Math.min(CONCURRENCY, remainingJobSlots))
       const batchResults = await Promise.all(
-        batch.map(({ kw, subArea, query }) =>
-          searchPlaces(query, apiKey, perAreaLimit)
-            .then(items => items.map(item => ({ ...item, kw, subArea })))
-            .catch(() => [] as (PlacesResult & { kw: string; subArea: string })[])
+        batch.map(({ kw, subArea, query, rectangle }) =>
+          searchPlaces(query, apiKey, rectangle, MAX_PAGES)
+            .then(result => ({
+              requestCount: result.requestCount,
+              items: result.items.map(item => ({ ...item, kw, subArea })),
+            }))
+            .catch((error: unknown) => ({
+              requestCount: error instanceof PlacesSearchError ? error.requestCount : 0,
+              items: [] as (PlacesResult & { kw: string; subArea: string })[],
+              error: error instanceof Error ? error.message : 'Google Maps APIの検索に失敗しました',
+            }))
         )
       )
+      jobsExecuted += batch.length
 
-      for (const items of batchResults) {
-        for (const item of items) {
-          // placeId dedup
+      for (const result of batchResults) {
+        requestCount += result.requestCount
+        if ('error' in result && result.error) searchErrors.push(result.error)
+        rawPlaceCount += result.items.length
+        for (const item of result.items) {
+          if (allResults.length >= targetResults) break
           if (seen.has(item.placeId)) continue
           seen.add(item.placeId)
 
-          // URLがある場合はhostname dedup
-          if (item.link) {
-            try {
-              const host = new URL(item.link).hostname.replace(/^www\./, '')
-              if (seenHost.has(host)) continue
-              seenHost.add(host)
-            } catch { /* URLなしはスキップしない */ }
+          // 「HP出力」の量基準なので、Google Mapsに公式HPが登録された
+          // 店舗のみ対象にし、同一ドメインは1件として数える。
+          if (!item.link) continue
+          let host: string
+          try {
+            host = new URL(item.link).hostname.replace(/^www\./, '').toLowerCase()
+          } catch {
+            continue
           }
+          if (!host || seenHost.has(host)) continue
+          seenHost.add(host)
 
           allResults.push({ ...item, area: item.subArea, keyword: item.kw })
         }
       }
     }
 
+    if (allResults.length === 0 && searchErrors.length > 0) {
+      throw new Error(searchErrors[0])
+    }
+
     return NextResponse.json({
       success: true,
       items: allResults,
       count: allResults.length,
+      targetResults,
+      targetReached: allResults.length >= targetResults,
+      rawPlaceCount,
+      uniquePlaces: seen.size,
+      queriesExecuted: requestCount,
+      requestBudget: REQUEST_BUDGET,
+      jobsExecuted,
+      gridCellCount,
+      searchRadiusKm,
+      keywordsUsed: keywords,
     })
   } catch (e) {
     return NextResponse.json({ success: false, error: String(e) }, { status: 400 })

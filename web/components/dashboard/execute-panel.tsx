@@ -4,8 +4,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { Play, Loader2, CheckCircle2, XCircle, ChevronDown, Plus, FolderOpen, X, ExternalLink, Square, Sparkles, MapPin, Briefcase, Database } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import type { Preset, Project, SearchProvider, KeywordMode } from '@/lib/types'
-import { estimateCost } from '@/lib/area-data'
 import { ProjectCreateModal } from '@/components/modals/project-create-modal'
+import { getErrorMessage } from '@/lib/error-message'
 
 const HISTORY_KEY = 'execute_panel_history'
 const MAX_HISTORY = 20
@@ -35,7 +35,7 @@ const KEYWORDS_MAP: Record<string, string[]> = {
   '中古車販売':  ['中古車', '中古車販売', '中古自動車', 'カーディーラー', 'カーショップ'],
 }
 
-type Status = 'idle' | 'queued' | 'running' | 'success' | 'error'
+type Status = 'idle' | 'submitting' | 'queued' | 'running' | 'success' | 'error' | 'canceled'
 
 interface BatchProgress {
   total: number
@@ -54,7 +54,9 @@ const EP_STORAGE_KEY = 'execute_panel_settings'
 
 function loadPanelSettings(): {
   industry?: string
-  selectedAreas?: string[]; selectedProjectId?: string
+  selectedAreas?: string[]
+  selectedProjectId?: string
+  searchProvider?: SearchProvider
 } {
   try {
     const raw = localStorage.getItem(EP_STORAGE_KEY)
@@ -117,9 +119,11 @@ export default function ExecutePanel() {
   // Track when the first item appeared (for items/min rate calculation)
   const firstItemTimeRef = useRef<number | null>(null)
   const prevLiveCountRef = useRef<number>(0)
+  const observedRunStatesRef = useRef<Record<string, 'queued' | 'running' | 'success' | 'error'>>({})
+  const canceledRunIdsRef = useRef<Set<string>>(new Set())
 
   const actualIndustry = industry
-  const isRunning = status === 'running' || status === 'queued'
+  const isRunning = status === 'submitting' || status === 'running' || status === 'queued'
   const canExecute = !isRunning && !!actualIndustry && !!selectedProjectId && !!areaInput && areaValid !== false && !keywordsLoading
 
   // Restore persisted settings on first mount
@@ -127,6 +131,7 @@ export default function ExecutePanel() {
     const s = loadPanelSettings()
     if (s.industry) setIndustry(s.industry)
     if (Array.isArray(s.selectedAreas) && s.selectedAreas.length > 0) setAreaInput(s.selectedAreas[0])
+    if (s.searchProvider === 'serper' || s.searchProvider === 'places') setSearchProvider(s.searchProvider)
     // Pre-load history for suggestions
     const h = loadHistory()
     setAreaSuggestions(h.areas)
@@ -138,8 +143,8 @@ export default function ExecutePanel() {
   // Persist settings whenever they change (after initial load)
   useEffect(() => {
     if (!_settingsLoaded) return
-    savePanelSettings({ industry, selectedAreas: [areaInput], selectedProjectId })
-  }, [_settingsLoaded, industry, areaInput, selectedProjectId])
+    savePanelSettings({ industry, selectedAreas: [areaInput], selectedProjectId, searchProvider })
+  }, [_settingsLoaded, industry, areaInput, selectedProjectId, searchProvider])
 
   // Validate area input (debounced 800ms)
   useEffect(() => {
@@ -270,44 +275,77 @@ export default function ExecutePanel() {
     return () => clearInterval(t)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Poll a single run and return its final status; updates live counters along the way
-  const pollSingleRun = useCallback((runId: string): Promise<'success' | 'error'> => {
+  // Poll a single run and return the authoritative backend state. n8nの照合も
+  // 個別API側で行うため、途中エラーがrunningのまま残らない。
+  const pollSingleRun = useCallback((runId: string): Promise<{
+    status: 'success' | 'error'
+    itemsWritten: number
+    error?: string
+  }> => {
     return new Promise((resolve) => {
-      const interval = setInterval(async () => {
-        try {
-          const res = await fetch(`/api/projects/runs/${runId}`)
-          const data = await res.json()
-          const run = data.data
-          if (!run) return
+      let consecutivePollErrors = 0
 
-          // Update live counter whenever itemsWritten changes
-          if (run.itemsWritten !== undefined && run.itemsWritten > 0) {
-            if (prevLiveCountRef.current === 0 && run.itemsWritten > 0) {
-              firstItemTimeRef.current = Date.now()
-            }
-            prevLiveCountRef.current = run.itemsWritten
-            setLiveCount(run.itemsWritten)
+      const poll = async () => {
+        if (canceledRunIdsRef.current.has(runId)) {
+          resolve({ status: 'error', itemsWritten: 0, error: 'ユーザーによりキャンセルされました' })
+          return
+        }
+        try {
+          const res = await fetch(`/api/projects/runs/${runId}`, { cache: 'no-store' })
+          const data = await res.json().catch(() => null)
+          if (!res.ok || !data?.success || !data.data) {
+            throw new Error(data?.error || `状態取得に失敗しました (${res.status})`)
           }
-          // Update queue position
-          if (run.queuePosition !== undefined) {
-            setQueuePosition(run.queuePosition)
-            if (run.queuePosition > 0) setStatus('queued')
-          } else {
-            setQueuePosition(0)
+
+          consecutivePollErrors = 0
+          const run = data.data
+          const written = typeof run.itemsWritten === 'number' ? run.itemsWritten : 0
+          if (written > 0) {
+            if (prevLiveCountRef.current === 0) firstItemTimeRef.current = Date.now()
+            prevLiveCountRef.current = Math.max(prevLiveCountRef.current, written)
+            setLiveCount((current) => Math.max(current, written))
           }
+
+          const queuePos = typeof run.queuePosition === 'number' ? run.queuePosition : 0
+          setQueuePosition(queuePos)
 
           if (run.status === 'success' || run.status === 'completed') {
-            clearInterval(interval)
-            setItemsWritten(run.itemsWritten ?? 0)
-            resolve('success')
-          } else if (run.status === 'error') {
-            clearInterval(interval)
-            resolve('error')
+            observedRunStatesRef.current[runId] = 'success'
+            resolve({ status: 'success', itemsWritten: written })
+            return
           }
-        } catch {
-          // continue polling
+          if (run.status === 'error') {
+            observedRunStatesRef.current[runId] = 'error'
+            resolve({
+              status: 'error',
+              itemsWritten: written,
+              error: run.error || '実行中にエラーが発生しました',
+            })
+            return
+          }
+
+          observedRunStatesRef.current[runId] = queuePos > 0 || run.status === 'pending'
+            ? 'queued'
+            : 'running'
+          const activeStates = Object.values(observedRunStatesRef.current)
+          if (activeStates.includes('running')) {
+            setStatus('running')
+            setLog('収集処理を実行中です')
+          } else if (activeStates.includes('queued')) {
+            setStatus('queued')
+            setLog(queuePos > 0 ? `キュー待機中（${queuePos}番目）` : '実行開始を待っています')
+          }
+        } catch (error) {
+          consecutivePollErrors++
+          if (consecutivePollErrors >= 3) {
+            setLog(`状態確認に失敗しています。自動再試行中: ${getErrorMessage(error)}`)
+          }
         }
-      }, 3000)
+
+        window.setTimeout(poll, 3000)
+      }
+
+      void poll()
     })
   }, [])
 
@@ -318,11 +356,15 @@ export default function ExecutePanel() {
     setAreaSuggestions(h.areas)
     setIndustrySuggestions(h.industries)
 
-    setStatus('running')
+    setStatus('submitting')
+    setLog('実行リクエストを送信中です')
     setItemsWritten(0)
     setLiveCount(0)
+    setQueuePosition(0)
     setBatchProgress(null)
     setCurrentRunIds([])
+    observedRunStatesRef.current = {}
+    canceledRunIdsRef.current = new Set()
     firstItemTimeRef.current = null
     prevLiveCountRef.current = 0
 
@@ -330,6 +372,10 @@ export default function ExecutePanel() {
     const effectiveAreas = selectedAreas
     const runIds: string[] = []
     const timestamp = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }).slice(0, 16)
+
+    let initialQueued = false
+    let initialQueuePosition = 0
+    let childInitialStates: Array<{ id: string; status: 'pending' | 'running' | 'error'; queuePosition: number }> = []
 
     {
       // Prefecture mode: single area → single job; multiple areas → batch (parent + child runs)
@@ -359,49 +405,102 @@ export default function ExecutePanel() {
             keywordMode,
             suffixes: suffixes.length > 0 ? suffixes : undefined,
             searchProvider,
+            maxResults: 1000,
           }),
         })
-        const data = await res.json()
-        if (!data.success) {
-          setLog(`キュー追加失敗: ${data.error}`)
+        const data = await res.json().catch(() => null)
+        if (!res.ok || !data?.success) {
+          setStatus('error')
+          setLog(`実行開始エラー: ${data?.error || `HTTP ${res.status}`}`)
+          return
         } else if (data.batch && Array.isArray(data.childRunIds)) {
           // Batch mode: poll child runs; parent run tracks aggregated stats in history
           runIds.push(...data.childRunIds)
+          childInitialStates = Array.isArray(data.childResults) ? data.childResults : []
         } else {
           // Single-area mode
           runIds.push(runId)
+          initialQueued = data.queued === true
+          initialQueuePosition = typeof data.queuePosition === 'number' ? data.queuePosition : 0
         }
       } catch (e) {
-        setLog(`エラー: ${String(e)}`)
-        runIds.push(runId)  // fallback so polling still starts
+        setStatus('error')
+        setLog(`実行開始エラー: ${getErrorMessage(e)}`)
+        return
       }
     }
 
+    if (runIds.length === 0) {
+      setStatus('error')
+      setLog('実行IDを取得できなかったため、処理を開始できませんでした')
+      return
+    }
+
     const progress: BatchProgress = { total: runIds.length, done: 0, success: 0, error: 0 }
-    setBatchProgress({ ...progress })
+    if (runIds.length > 1) setBatchProgress({ ...progress })
     setCurrentRunIds([...runIds])
-    setStatus('running')
-    setLog(
-      runIds.length > 1
-        ? `${runIds.length} エリアのバッチ実行を開始しました`
-        : '実行開始しました'
-    )
+
+    if (runIds.length > 1) {
+      for (const child of childInitialStates) {
+        observedRunStatesRef.current[child.id] = child.status === 'pending'
+          ? 'queued'
+          : child.status
+      }
+      const states = Object.values(observedRunStatesRef.current)
+      const queuedChild = childInitialStates.find((child) => child.status === 'pending')
+      if (states.includes('running')) {
+        setStatus('running')
+        setLog(`${runIds.length}エリアの収集を実行中です`)
+      } else if (states.includes('queued')) {
+        setStatus('queued')
+        setQueuePosition(queuedChild?.queuePosition ?? 0)
+        setLog(`${runIds.length}エリアがキューで待機中です`)
+      } else {
+        setStatus('running')
+        setLog(`${runIds.length}エリアの状態を確認中です`)
+      }
+    } else if (initialQueued) {
+      observedRunStatesRef.current[runIds[0]] = 'queued'
+      setStatus('queued')
+      setQueuePosition(initialQueuePosition)
+      setLog(`キュー待機中（${initialQueuePosition}番目）`)
+    } else {
+      observedRunStatesRef.current[runIds[0]] = 'running'
+      setStatus('running')
+      setLog('収集処理を実行中です')
+    }
 
     // Poll all runs in parallel
+    let totalItemsWritten = 0
+    const errors: string[] = []
     const polls = runIds.map((rId) =>
       pollSingleRun(rId).then((result) => {
         progress.done++
-        if (result === 'success') progress.success++
-        else progress.error++
-        setBatchProgress({ ...progress })
+        totalItemsWritten += result.itemsWritten
+        if (result.status === 'success') progress.success++
+        else {
+          progress.error++
+          if (result.error) errors.push(result.error)
+        }
+        if (runIds.length > 1) setBatchProgress({ ...progress })
         if (progress.done === progress.total) {
           const allOk = progress.error === 0
-          setStatus(allOk ? 'success' : progress.success > 0 ? 'success' : 'error')
+          const wasCanceled = runIds.every((id) => canceledRunIdsRef.current.has(id))
+          setStatus(wasCanceled ? 'canceled' : allOk ? 'success' : 'error')
+          setItemsWritten(totalItemsWritten)
+          setLiveCount(totalItemsWritten)
+          setQueuePosition(0)
           setCurrentRunIds([])
           setLog(
-            allOk
-              ? `完了: ${progress.success} エリア全て成功`
-              : `完了: ${progress.success} 成功 / ${progress.error} 失敗`
+            wasCanceled
+              ? '実行をキャンセルしました'
+              : allOk
+              ? runIds.length > 1
+                ? `完了: ${progress.success}エリアすべて成功`
+                : `完了: ${totalItemsWritten.toLocaleString()}件を追加しました`
+              : runIds.length > 1
+                ? `エラー: ${progress.success}成功 / ${progress.error}失敗${errors[0] ? ` — ${errors[0]}` : ''}`
+                : `エラー: ${errors[0] || '実行に失敗しました'}`
           )
         }
       })
@@ -415,21 +514,24 @@ export default function ExecutePanel() {
   const handleCancel = async () => {
     if (currentRunIds.length === 0 || canceling) return
     setCanceling(true)
+    canceledRunIdsRef.current = new Set(currentRunIds)
     try {
       await Promise.all(currentRunIds.map((runId) =>
         fetch(`/api/projects/runs/${runId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: 'error' }),
+          body: JSON.stringify({ status: 'error', error: 'ユーザーによりキャンセルされました' }),
         }).catch(() => {})
       ))
     } finally {
       setCanceling(false)
       setCurrentRunIds([])
-      setStatus('idle')
-      setLog('')
+      setStatus('canceled')
+      setLog('実行をキャンセルしました')
       setBatchProgress(null)
       setLiveCount(0)
+      setQueuePosition(0)
+      observedRunStatesRef.current = {}
     }
   }
 
@@ -439,6 +541,8 @@ export default function ExecutePanel() {
     // area may be comma-separated — take first one
     const area = t.area.includes(',') ? t.area.split(',')[0].trim() : t.area
     setAreaInput(area)
+    setKeywordMode(t.keywordMode ?? 'or')
+    setSearchProvider(t.searchProvider ?? 'serper')
     setShowPresets(false)
   }
 
@@ -452,7 +556,17 @@ export default function ExecutePanel() {
       await fetch('/api/config/presets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, searchTarget: { industry: actualIndustry, area, keywords: activeKeywords, keywordMode } }),
+        body: JSON.stringify({
+          name,
+          searchTarget: {
+            industry: actualIndustry,
+            area,
+            keywords: activeKeywords,
+            keywordMode,
+            searchProvider,
+            maxResults: 1000,
+          },
+        }),
       })
       const r = await fetch('/api/config/presets')
       const d = await r.json()
@@ -757,7 +871,7 @@ export default function ExecutePanel() {
                   : 'bg-white text-gray-600 border-gray-300 hover:border-gray-400'
               }`}
             >
-              Serper
+              Serper（Google Maps）
             </button>
             <button
               type="button"
@@ -773,10 +887,17 @@ export default function ExecutePanel() {
             </button>
           </div>
           <div className="text-xs text-gray-700">
-            概算コスト:&nbsp;
-            <span className="font-semibold">
-              ${estimateCost(keywords.length, selectedAreas, false, 1000000).toFixed(2)}
-            </span>
+            {searchProvider === 'serper' ? (
+              <>
+                目標: <span className="font-semibold">HP 1,000件以上</span>
+                <span className="ml-2 text-gray-400">最大300検索</span>
+              </>
+            ) : (
+              <>
+                目標: <span className="font-semibold">HP 1,000件以上</span>
+                <span className="ml-2 text-gray-400">最大450検索</span>
+              </>
+            )}
           </div>
         </div>
 
@@ -791,7 +912,9 @@ export default function ExecutePanel() {
             className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-medium px-5 py-2 rounded transition-colors text-sm"
           >
             {isRunning ? (
-              <><Loader2 className="w-4 h-4 animate-spin" /> {status === 'queued' ? '待機中...' : '実行中...'}</>
+              <><Loader2 className="w-4 h-4 animate-spin" /> {
+                status === 'submitting' ? '受付中...' : status === 'queued' ? '待機中...' : '実行中...'
+              }</>
             ) : keywordsLoading ? (
               <><Loader2 className="w-4 h-4 animate-spin" /> キーワード生成中...</>
             ) : (
@@ -816,14 +939,16 @@ export default function ExecutePanel() {
             </button>
           )}
 
-          {status !== 'idle' && !batchProgress && (
+          {status !== 'idle' && (
             <div className="flex items-center gap-2 text-sm">
               {isRunning && <span className="text-blue-500 animate-pulse">●</span>}
               {status === 'success' && <CheckCircle2 className="w-4 h-4 text-green-600" />}
               {status === 'error' && <XCircle className="w-4 h-4 text-red-500" />}
+              {status === 'canceled' && <Square className="w-4 h-4 text-gray-500 fill-current" />}
               <span className={
                 status === 'success' ? 'text-green-700' :
-                status === 'error' ? 'text-red-600' : 'text-blue-700'
+                status === 'error' ? 'text-red-600' :
+                status === 'canceled' ? 'text-gray-600' : 'text-blue-700'
               }>{log}</span>
             </div>
           )}
@@ -841,11 +966,21 @@ export default function ExecutePanel() {
 
         {/* Batch progress */}
         {batchProgress && (
-          <div className="bg-blue-50 border border-blue-200 rounded px-3 py-2.5 space-y-1.5">
+          <div className={`rounded border px-3 py-2.5 space-y-1.5 ${
+            batchProgress.done === batchProgress.total && batchProgress.error > 0
+              ? 'bg-red-50 border-red-200'
+              : 'bg-blue-50 border-blue-200'
+          }`}>
             <div className="flex items-center justify-between text-xs">
-              <span className="text-blue-700 font-medium">
+              <span className={`font-medium ${
+                batchProgress.done === batchProgress.total && batchProgress.error > 0
+                  ? 'text-red-700'
+                  : 'text-blue-700'
+              }`}>
                 {batchProgress.done < batchProgress.total ? (
                   <><Loader2 className="w-3 h-3 animate-spin inline mr-1" />実行中...</>
+                ) : batchProgress.error > 0 ? (
+                  <><XCircle className="w-3 h-3 inline mr-1 text-red-600" />エラーあり</>
                 ) : (
                   <><CheckCircle2 className="w-3 h-3 inline mr-1 text-green-600" />完了</>
                 )}

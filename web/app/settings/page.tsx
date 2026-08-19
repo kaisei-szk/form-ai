@@ -22,6 +22,7 @@ export default function SettingsPage() {
 /* ─── Queue Settings Section ─────────────────────────── */
 function QueueSettings() {
   const [maxConcurrent, setMaxConcurrentState] = useState<number | null>(null)
+  const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [saved, setSaved] = useState(false)
@@ -29,8 +30,15 @@ function QueueSettings() {
   useEffect(() => {
     fetch('/api/queue')
       .then((r) => r.json())
-      .then((d) => { if (d.success) setMaxConcurrentState(d.data.maxConcurrent) })
-      .catch(() => {})
+      .then((d) => {
+        if (d.success && typeof d.data?.maxConcurrent === 'number') {
+          setMaxConcurrentState(d.data.maxConcurrent)
+        } else {
+          setError(d.error || 'キュー設定の取得に失敗しました')
+        }
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : 'キュー設定の取得に失敗しました'))
+      .finally(() => setLoading(false))
   }, [])
 
   const handleSave = async (n: number) => {
@@ -57,8 +65,6 @@ function QueueSettings() {
     }
   }
 
-  if (maxConcurrent === null) return null
-
   return (
     <section className="bg-white rounded border border-gray-200 shadow-sm p-5">
       <div className="flex items-center gap-2 mb-4">
@@ -66,29 +72,33 @@ function QueueSettings() {
         <h2 className="text-sm font-semibold text-gray-800">キュー設定</h2>
       </div>
       {error && <div className="text-red-600 text-sm mb-3">{error}</div>}
-      <div className="flex items-center gap-4">
-        <div>
-          <label className="block text-xs text-gray-500 mb-1">最大同時実行数</label>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => handleSave(Math.max(1, maxConcurrent - 1))}
-              disabled={saving || maxConcurrent <= 1}
-              className="w-7 h-7 flex items-center justify-center text-gray-600 bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-40 text-lg font-bold"
-            >−</button>
-            <span className="text-2xl font-bold text-gray-900 w-8 text-center">{maxConcurrent}</span>
-            <button
-              onClick={() => handleSave(Math.min(10, maxConcurrent + 1))}
-              disabled={saving || maxConcurrent >= 10}
-              className="w-7 h-7 flex items-center justify-center text-gray-600 bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-40 text-lg font-bold"
-            >+</button>
+      {loading ? (
+        <div className="text-gray-400 text-sm">読み込み中...</div>
+      ) : maxConcurrent !== null ? (
+        <div className="flex items-center gap-4">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">最大同時実行数</label>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleSave(Math.max(1, maxConcurrent - 1))}
+                disabled={saving || maxConcurrent <= 1}
+                className="w-7 h-7 flex items-center justify-center text-gray-600 bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-40 text-lg font-bold"
+              >−</button>
+              <span className="text-2xl font-bold text-gray-900 w-8 text-center">{maxConcurrent}</span>
+              <button
+                onClick={() => handleSave(Math.min(10, maxConcurrent + 1))}
+                disabled={saving || maxConcurrent >= 10}
+                className="w-7 h-7 flex items-center justify-center text-gray-600 bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-40 text-lg font-bold"
+              >+</button>
+            </div>
+          </div>
+          <div className="text-xs text-gray-400 max-w-xs">
+            n8nワークフローを同時に何件まで実行するかを設定します。
+            サーバーリソースに合わせて調整してください（推奨: 1〜5）。
+            {saved && <span className="ml-2 text-green-600 font-medium">✓ 保存済み</span>}
           </div>
         </div>
-        <div className="text-xs text-gray-400 max-w-xs">
-          n8nワークフローを同時に何件まで実行するかを設定します。
-          サーバーリソースに合わせて調整してください（推奨: 1〜5）。
-          {saved && <span className="ml-2 text-green-600 font-medium">✓ 保存済み</span>}
-        </div>
-      </div>
+      ) : null}
     </section>
   )
 }
@@ -101,12 +111,18 @@ function PresetsSection() {
 
   const load = async () => {
     setLoading(true)
+    setError('')
     try {
       const r = await fetch('/api/config/presets')
       const d = await r.json()
-      if (d.success) setPresets(d.data)
+      if (d.success && Array.isArray(d.data)) {
+        setPresets(d.data)
+      } else {
+        setPresets([])
+        setError(d.error || 'プリセットの取得に失敗しました')
+      }
     } catch (e) {
-      setError(String(e))
+      setError(e instanceof Error ? e.message : 'プリセットの取得に失敗しました')
     } finally {
       setLoading(false)
     }
@@ -222,12 +238,18 @@ function RunsSection() {
 
   const load = async () => {
     setLoading(true)
+    setError('')
     try {
       const r = await fetch('/api/config')
       const d = await r.json()
-      if (d.success) setRuns(d.data.runs || [])
+      if (d.success && Array.isArray(d.data?.runs)) {
+        setRuns(d.data.runs)
+      } else {
+        setRuns([])
+        setError(d.error || '実行設定の取得に失敗しました')
+      }
     } catch (e) {
-      setError(String(e))
+      setError(e instanceof Error ? e.message : '実行設定の取得に失敗しました')
     } finally {
       setLoading(false)
     }

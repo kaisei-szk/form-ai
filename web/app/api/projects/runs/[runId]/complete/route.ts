@@ -4,6 +4,7 @@ import { updateRunStatus, getProjectRun, rollupBatchRun } from '@/lib/project-ma
 import { markJobDone, isQueueIdle } from '@/lib/run-queue'
 import { calcCostUsd } from '@/lib/n8n-sync'
 import { addCompanies, countCompanies } from '@/lib/companies-db'
+import { getErrorMessage } from '@/lib/error-message'
 import type { CompanyInput } from '@/lib/companies-db'
 
 const ResultsSchema = z.object({
@@ -60,6 +61,16 @@ export async function POST(
   try {
     const body = Schema.parse(await req.json())
     const { runId } = params
+    const existingRun = await getProjectRun(runId)
+
+    // キャンセル後にn8nが遅れてコールバックしても、成功状態への巻き戻しや
+    // データ追加を行わない。
+    if (
+      existingRun?.status === 'error'
+      && existingRun.error?.includes('キャンセル')
+    ) {
+      return NextResponse.json({ success: true, ignored: true, reason: 'run_canceled' })
+    }
 
     // コスト計算: Google Custom Search API + OpenAI LLM の両方を合算する
     // CSE: queryCount × $0.005/query ($5/1000クエリ)
@@ -141,6 +152,6 @@ export async function POST(
 
     return NextResponse.json({ success: true, itemsWritten, upgraded: actualUpgraded })
   } catch (e) {
-    return NextResponse.json({ success: false, error: String(e) }, { status: 400 })
+    return NextResponse.json({ success: false, error: getErrorMessage(e) }, { status: 400 })
   }
 }

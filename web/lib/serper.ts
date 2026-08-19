@@ -151,6 +151,9 @@ export type SerperResultItem = {
   snippet: string
   keyword: string
   area: string
+  placeId?: string
+  phone?: string
+  address?: string
 }
 
 export const DEFAULT_SUFFIXES = ['お問い合わせ', '公式サイト', 'contact', '予約', '申込み']
@@ -170,7 +173,29 @@ const SKIP_DOMAINS = new Set([
 
 function extractHost(url: string): string {
   const m = url.match(/^https?:\/\/([^/?#]+)/)
-  return m ? m[1].replace(/^www\./, '') : ''
+  return m ? m[1].replace(/^www\./, '').toLowerCase() : ''
+}
+
+const STATION_SEARCH_AREAS: Record<string, string[]> = {
+  '新宿駅': ['新宿駅', '新宿西口', '新宿東口', '西新宿', '歌舞伎町', '新宿三丁目', '代々木'],
+  '渋谷駅': ['渋谷駅', '渋谷', '道玄坂', '宇田川町', '神南', '表参道', '恵比寿', '青山'],
+}
+
+function expandSearchAreas(area: string): string[] {
+  if (STATION_SEARCH_AREAS[area]) return STATION_SEARCH_AREAS[area]
+  return expandArea(area)
+}
+
+type SerperPlace = {
+  title?: string
+  address?: string
+  website?: string
+  phoneNumber?: string
+  description?: string
+  type?: string
+  category?: string
+  placeId?: string
+  cid?: string
 }
 
 export async function runSerperSearch(params: {
@@ -178,75 +203,120 @@ export async function runSerperSearch(params: {
   area: string
   suffixes?: string[]
   keywordMode?: 'or' | 'and'
+  maxResults?: number
   apiKey: string
-}): Promise<{ items: SerperResultItem[]; error?: { status: number; text: string } }> {
-  const { keywords, area, suffixes, keywordMode, apiKey } = params
-  // エリア展開はUI/n8nのバッチ分割に委譲。ここでは単一エリアとして扱う
-  const subAreas = [area]
+}): Promise<{
+  items: SerperResultItem[]
+  error?: { status: number; text: string }
+  stats: {
+    targetResults: number
+    targetReached: boolean
+    queriesExecuted: number
+    requestBudget: number
+    rawPlaceCount: number
+    uniquePlaceCount: number
+    searchAreaCount: number
+  }
+}> {
+  const { keywords, area, keywordMode, apiKey } = params
+  const targetResults = params.maxResults === 0 ? 1000 : (params.maxResults ?? 1000)
+  const subAreas = expandSearchAreas(area)
   const pages = 10
-  const SUFFIXES = (suffixes && suffixes.length > 0) ? suffixes : DEFAULT_SUFFIXES
-  // 'and' モードは全キーワードを1つのクエリに結合して絞り込み検索にする（例: "飲食店 ラーメン"）
-  // 'or'（デフォルト）はキーワードごとに独立検索して結果を合算する（同義語での網羅向け）
+  // AND は複数語を1検索にまとめ、OR は同義語ごとにGoogle Maps検索する。
   const keywordGroups = (keywordMode === 'and' && keywords.length > 0) ? [keywords.join(' ')] : keywords
 
   type QueryJob = { query: string; kw: string; subArea: string; page: number }
   const jobs: QueryJob[] = []
-  for (const kw of keywordGroups) {
+  // 1ページ目を全エリアで先に取得し、同じ場所の深いページへ偏らない順序にする。
+  for (let page = 1; page <= pages; page++) {
     for (const subArea of subAreas) {
-      for (const suffix of SUFFIXES) {
-        const query = suffix ? `${kw} ${subArea} ${suffix}` : `${kw} ${subArea}`
-        for (let p = 0; p < pages; p++) {
-          jobs.push({ query, kw, subArea, page: p + 1 })
-        }
+      for (const kw of keywordGroups) {
+        jobs.push({ query: `${kw} ${subArea}`, kw, subArea, page })
       }
     }
   }
 
   const CONCURRENCY = 5
-  const seenUrls = new Set<string>()
+  const REQUEST_BUDGET = Math.min(300, Math.max(10, Math.ceil(targetResults * 0.3)))
+  const seenPlaces = new Set<string>()
   const seenHosts = new Set<string>()
   const rawResults: SerperResultItem[] = []
   let hasApiError: { status: number; text: string } | null = null
+  let queriesExecuted = 0
+  let rawPlaceCount = 0
 
-  for (let i = 0; i < jobs.length; i += CONCURRENCY) {
-    const batch = jobs.slice(i, i + CONCURRENCY)
+  for (let i = 0; i < jobs.length && queriesExecuted < REQUEST_BUDGET; i += CONCURRENCY) {
+    if (rawResults.length >= targetResults) break
+    const remaining = REQUEST_BUDGET - queriesExecuted
+    const batch = jobs.slice(i, i + Math.min(CONCURRENCY, remaining))
     const results = await Promise.all(batch.map(async ({ query, kw, subArea, page }) => {
-      const res = await fetch('https://google.serper.dev/search', {
+      const res = await fetch('https://google.serper.dev/places', {
         method: 'POST',
         headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ q: query, gl: 'jp', hl: 'ja', num: 10, page }),
+        body: JSON.stringify({ q: query, gl: 'jp', hl: 'ja', page }),
+        signal: AbortSignal.timeout(30_000),
       })
       if (!res.ok) {
         const text = await res.text()
         return { error: { status: res.status, text } }
       }
-      const data = await res.json() as { error?: string; organic?: SerperItem[] }
-      if (data.error) return { items: [] as SerperResultItem[] }
+      const data = await res.json() as { error?: string; places?: SerperPlace[] }
+      if (data.error) return { error: { status: 502, text: data.error } }
       return {
-        items: (data.organic ?? []).map(item => ({
-          link: item.link || '', title: item.title || '', snippet: item.snippet || '', keyword: kw, area: subArea,
+        places: (data.places ?? []).map(place => ({
+          ...place,
+          keyword: kw,
+          searchArea: subArea,
         })),
       }
     }))
+    queriesExecuted += batch.length
 
     for (const r of results) {
-      if ('error' in r && r.error) { hasApiError = r.error; break }
-      for (const item of (r as { items: SerperResultItem[] }).items ?? []) {
-        if (!item.link) continue
-        if (seenUrls.has(item.link)) continue
-        const host = extractHost(item.link)
+      if ('error' in r && r.error) {
+        hasApiError = r.error
+        continue
+      }
+      for (const place of r.places ?? []) {
+        rawPlaceCount++
+        const placeKey = place.placeId || place.cid || `${place.title ?? ''}|${place.address ?? ''}`
+        if (!placeKey || seenPlaces.has(placeKey)) continue
+        seenPlaces.add(placeKey)
+
+        // 「HP出力」基準のためGoogle MapsにHPが登録された場所だけ採用する。
+        const link = place.website || ''
+        if (!link) continue
+        const host = extractHost(link)
         if (!host) continue
         if (SKIP_DOMAINS.has(host) || [...SKIP_DOMAINS].some(d => host.endsWith('.' + d))) continue
         if (seenHosts.has(host)) continue
-        seenUrls.add(item.link)
         seenHosts.add(host)
-        rawResults.push(item)
+        rawResults.push({
+          link,
+          title: place.title || '',
+          snippet: place.description || place.type || place.category || '',
+          keyword: place.keyword,
+          area: place.searchArea,
+          placeId: place.placeId,
+          phone: place.phoneNumber || '',
+          address: place.address || '',
+        })
+        if (rawResults.length >= targetResults) break
       }
     }
-    if (hasApiError) break
+    if (hasApiError || rawResults.length >= targetResults) break
     if (i + CONCURRENCY < jobs.length) await new Promise((r) => setTimeout(r, 1100))
   }
 
-  if (hasApiError) return { items: rawResults, error: hasApiError }
-  return { items: rawResults }
+  const stats = {
+    targetResults,
+    targetReached: rawResults.length >= targetResults,
+    queriesExecuted,
+    requestBudget: REQUEST_BUDGET,
+    rawPlaceCount,
+    uniquePlaceCount: seenPlaces.size,
+    searchAreaCount: subAreas.length,
+  }
+  if (hasApiError) return { items: rawResults, error: hasApiError, stats }
+  return { items: rawResults, stats }
 }

@@ -135,6 +135,18 @@ export async function getRunsForProject(projectId: string): Promise<ProjectRun[]
   return (data ?? []).map(rowToRun)
 }
 
+/** Fetch every project run in one query for list/history pages. */
+export async function getAllProjectRuns(): Promise<ProjectRun[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
+  const { data, error } = await supabase
+    .from('project_runs')
+    .select('*')
+    .order('created_at', { ascending: false })
+  if (error) throw error
+  return (data ?? []).map(rowToRun)
+}
+
 export async function getProjectRun(runId: string): Promise<ProjectRun | undefined> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const supabase = getSql() as any
@@ -268,18 +280,22 @@ export async function rollupBatchRun(parentRunId: string): Promise<void> {
   const totalTokIn     = children.reduce((s: number, c: ProjectRun) => s + (c.tokensInput         ?? 0), 0)
   const totalTokOut    = children.reduce((s: number, c: ProjectRun) => s + (c.tokensOutput         ?? 0), 0)
   const totalRawSearch = children.reduce((s: number, c: ProjectRun) => s + (c.rawSearchCount      ?? 0), 0)
-  const hasSuccess     = children.some((c: ProjectRun) => c.status === 'success' || c.status === 'completed')
+  const allSucceeded   = children.every((c: ProjectRun) => c.status === 'success' || c.status === 'completed')
+  const failedChildren = children.filter((c: ProjectRun) => c.status === 'error')
 
   const { error } = await supabase
     .from('project_runs')
     .update({
-      status:             hasSuccess ? 'success' : 'error',
+      status:             allSucceeded ? 'success' : 'error',
       items_written:      totalItems,
       completed_at:       new Date().toISOString(),
       estimated_cost_usd: totalCost > 0 ? totalCost : null,
       tokens_input:       totalTokIn > 0 ? totalTokIn : null,
       tokens_output:      totalTokOut > 0 ? totalTokOut : null,
       raw_search_count:   totalRawSearch > 0 ? totalRawSearch : null,
+      error:              allSucceeded
+        ? null
+        : `${failedChildren.length}/${children.length}件のエリアで実行に失敗しました`,
     })
     .eq('id', parentRunId)
   if (error) throw error
@@ -315,7 +331,11 @@ export async function expireStaleRuns(
 
   const { data: runningRows, error: runningError } = await supabase
     .from('project_runs')
-    .update({ status: 'error', completed_at: now.toISOString() })
+    .update({
+      status: 'error',
+      completed_at: now.toISOString(),
+      error: '実行開始から2時間以上応答がないためタイムアウトしました',
+    })
     .eq('status', 'running')
     .lt('created_at', runningCutoff)
     .select('id')
@@ -323,7 +343,11 @@ export async function expireStaleRuns(
 
   const { data: pendingRows, error: pendingError } = await supabase
     .from('project_runs')
-    .update({ status: 'error', completed_at: now.toISOString() })
+    .update({
+      status: 'error',
+      completed_at: now.toISOString(),
+      error: 'キュー待機が24時間を超えたためタイムアウトしました',
+    })
     .eq('status', 'pending')
     .lt('created_at', pendingCutoff)
     .select('id')

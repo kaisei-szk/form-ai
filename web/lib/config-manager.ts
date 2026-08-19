@@ -18,7 +18,7 @@ const SearchTargetSchema = z.object({
   industry: z.string().min(1),
   area: z.string().min(1),
   keywords: z.array(z.string()),
-  maxResults: z.number().int().min(1).max(200),
+  maxResults: z.number().int().min(1).max(1000),
 })
 
 const SearchRunSchema = z.object({

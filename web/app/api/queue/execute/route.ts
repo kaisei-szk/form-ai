@@ -1,8 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { enqueue, markJobActive, markJobDone } from '@/lib/run-queue'
-import { addRunToProject, addBatchRunToProject, getProject } from '@/lib/project-manager'
+import {
+  addRunToProject,
+  addBatchRunToProject,
+  getProject,
+  rollupBatchRun,
+  updateRunStatus,
+} from '@/lib/project-manager'
 import { triggerWorkflow } from '@/lib/n8n-client'
+import { getErrorMessage } from '@/lib/error-message'
 import type { ExecuteParams } from '@/lib/types'
 
 const Schema = z.object({
@@ -47,8 +54,18 @@ export async function POST(req: NextRequest) {
     const keywords = execFields.keywords ?? [execFields.industry]
     const keywordMode = execFields.keywordMode ?? 'or'
     const suffixes = execFields.suffixes ?? []
-    const maxResults = execFields.maxResults ?? 50
+    const searchProvider = execFields.searchProvider ?? 'serper'
+    const maxResults = execFields.maxResults ?? 1000
     const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3000'
+
+    const startNextQueuedRun = async (next: Awaited<ReturnType<typeof markJobDone>>) => {
+      if (!next) return
+      await fetch(`${base}/api/queue/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runId: next.runId, params: next.params }),
+      }).catch(() => {})
+    }
 
     // ── Batch mode: multiple prefectures → 1 parent + N child runs ──────────
     const isBatch = execFields.areas && execFields.areas.length > 1 && execFields.searchMode !== 'radius'
@@ -76,6 +93,7 @@ export async function POST(req: NextRequest) {
             areas,
             keywords,
             keywordMode,
+            searchProvider,
             maxResults,
           },
         },
@@ -83,7 +101,13 @@ export async function POST(req: NextRequest) {
       )
 
       // Enqueue each child independently (respects MAX_CONCURRENT)
-      const childResults: { id: string; queued: boolean; queuePosition: number }[] = []
+      const childResults: {
+        id: string
+        queued: boolean
+        queuePosition: number
+        status: 'pending' | 'running' | 'error'
+        error?: string
+      }[] = []
       let anyChildStarted = false
 
       for (const child of children) {
@@ -96,41 +120,54 @@ export async function POST(req: NextRequest) {
           maxResults,
           projectId,
           runId: child.id,
-          ...(execFields.searchProvider && { searchProvider: execFields.searchProvider }),
+          searchProvider,
         }
 
         const { canStart, queuePosition } = await enqueue(child.id, projectId, childParams)
 
         if (canStart) {
-          anyChildStarted = true
           await markJobActive(child.id)
           try {
             const result = await triggerWorkflow(childParams)
-            fetch(`${base}/api/projects/runs/${child.id}`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ status: 'running', n8nExecutionId: result.executionId }),
-            }).catch(() => {})
+            anyChildStarted = true
+            await updateRunStatus(child.id, 'running', result.executionId)
+            childResults.push({
+              id: child.id,
+              queued: false,
+              queuePosition: 0,
+              status: 'running',
+            })
           } catch (triggerErr) {
-            await markJobDone(child.id, 'failed', String(triggerErr))
-            fetch(`${base}/api/projects/runs/${child.id}`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ status: 'error' }),
-            }).catch(() => {})
+            const error = getErrorMessage(triggerErr, 'n8nの起動に失敗しました')
+            const next = await markJobDone(child.id, 'failed', error)
+            await updateRunStatus(child.id, 'error', undefined, 0, {
+              completedAt: new Date().toISOString(),
+              error,
+            })
+            await startNextQueuedRun(next)
+            childResults.push({
+              id: child.id,
+              queued: false,
+              queuePosition: 0,
+              status: 'error',
+              error,
+            })
           }
+        } else {
+          childResults.push({
+            id: child.id,
+            queued: true,
+            queuePosition,
+            status: 'pending',
+          })
         }
-
-        childResults.push({ id: child.id, queued: !canStart, queuePosition })
       }
 
       // Promote batch parent to 'running' once at least one child has started
       if (anyChildStarted) {
-        fetch(`${base}/api/projects/runs/${runId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: 'running' }),
-        }).catch(() => {})
+        await updateRunStatus(runId, 'running')
+      } else {
+        await rollupBatchRun(runId)
       }
 
       return NextResponse.json({
@@ -152,13 +189,13 @@ export async function POST(req: NextRequest) {
       maxResults,
       projectId,
       runId,
+      searchProvider,
       ...(execFields.searchMode === 'radius' && {
         searchMode: 'radius',
         lat: execFields.lat,
         lng: execFields.lng,
         radiusKm: execFields.radiusKm,
       }),
-      ...(execFields.searchProvider && { searchProvider: execFields.searchProvider }),
     }
 
     // Register run in project (include radius fields so retry can reproduce exact conditions)
@@ -170,6 +207,7 @@ export async function POST(req: NextRequest) {
         area: execFields.area,
         keywords,
         keywordMode,
+        searchProvider,
         maxResults,
         ...(execFields.searchMode === 'radius' && {
           searchMode: 'radius' as const,
@@ -198,11 +236,7 @@ export async function POST(req: NextRequest) {
     try {
       const result = await triggerWorkflow(params)
       // Update run status to running
-      await fetch(`${base}/api/projects/runs/${runId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'running', n8nExecutionId: result.executionId }),
-      }).catch(() => {})
+      await updateRunStatus(runId, 'running', result.executionId)
 
       return NextResponse.json({
         success: true,
@@ -211,15 +245,16 @@ export async function POST(req: NextRequest) {
       })
     } catch (triggerErr) {
       // Trigger failed — mark queue job as failed so it doesn't block the queue
-      await markJobDone(runId, 'failed', String(triggerErr))
-      await fetch(`${base}/api/projects/runs/${runId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'error' }),
-      }).catch(() => {})
+      const error = getErrorMessage(triggerErr, 'n8nの起動に失敗しました')
+      const next = await markJobDone(runId, 'failed', error)
+      await updateRunStatus(runId, 'error', undefined, 0, {
+        completedAt: new Date().toISOString(),
+        error,
+      })
+      await startNextQueuedRun(next)
       throw triggerErr
     }
   } catch (e) {
-    return NextResponse.json({ success: false, error: String(e) }, { status: 400 })
+    return NextResponse.json({ success: false, error: getErrorMessage(e) }, { status: 400 })
   }
 }

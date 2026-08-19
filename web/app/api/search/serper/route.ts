@@ -8,7 +8,7 @@ const Schema = z.object({
   keywords:    z.array(z.string()).default([]),
   industry:    z.string().optional(),
   area:        z.string().min(1),
-  maxResults:  z.number().int().min(0).default(0),
+  maxResults:  z.number().int().min(0).default(1000),
   suffixes:    z.array(z.string()).optional(),
   keywordMode: z.enum(['or', 'and']).optional(),
 })
@@ -29,11 +29,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'SERPER_API_KEY not configured' }, { status: 500 })
     }
 
-    const { items, error: apiErr } = await runSerperSearch({
+    const { items, error: apiErr, stats } = await runSerperSearch({
       keywords: body.keywords,
       area: body.area,
       suffixes: body.suffixes,
       keywordMode: body.keywordMode,
+      maxResults: body.maxResults,
       apiKey,
     })
 
@@ -41,7 +42,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: `Serper API error: ${apiErr.status} ${apiErr.text}` }, { status: 502 })
     }
 
-    return NextResponse.json({ success: true, items, count: items.length })
+    return NextResponse.json({ success: true, items, count: items.length, ...stats })
   } catch (e) {
     return NextResponse.json({ success: false, error: String(e) }, { status: 400 })
   }

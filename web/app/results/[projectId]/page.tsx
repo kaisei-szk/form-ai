@@ -404,7 +404,7 @@ export default function ProjectResultsPage() {
       await fetch(`/api/projects/runs/${runId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'error' }),
+        body: JSON.stringify({ status: 'error', error: 'ユーザーによりキャンセルされました' }),
       })
       refreshProject()
     } catch { /* ignore */ } finally {
@@ -426,7 +426,8 @@ export default function ProjectResultsPage() {
         area: st.area,
         keywords: st.keywords,
         keywordMode: st.keywordMode,
-        maxResults: st.maxResults,
+        searchProvider: st.searchProvider ?? 'serper',
+        maxResults: st.maxResults ?? 1000,
       }
       if (st.areas && st.areas.length > 1) body.areas = st.areas
       if (st.searchMode === 'radius') {
@@ -440,15 +441,15 @@ export default function ProjectResultsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      const data = await res.json()
-      if (data.success) {
+      const data = await res.json().catch(() => null)
+      if (res.ok && data?.success) {
         refreshProject()
         setSelectedRunId(newRunId)
       } else {
-        setError(data.error || '再実行の開始に失敗しました')
+        setError(data?.error || `再実行の開始に失敗しました (${res.status})`)
       }
     } catch (e) {
-      setError(String(e))
+      setError(e instanceof Error ? e.message : '再実行の開始に失敗しました')
     } finally {
       setRetryingRunId(null)
     }

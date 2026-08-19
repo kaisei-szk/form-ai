@@ -74,7 +74,7 @@
             {
               "id": "param-maxResults",
               "name": "maxResults",
-              "value": "={{ $json.body?.maxResults ?? 50 }}",
+              "value": "={{ $json.body?.maxResults ?? 1000 }}",
               "type": "string"
             },
             {
@@ -140,7 +140,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ keywords: Array.isArray($json.keywords) ? $json.keywords : JSON.parse($json.keywords || JSON.stringify([$json.industry])), area: $json.area, maxResults: parseInt($json.maxResults) ?? 50, suffixes: Array.isArray($json.suffixes) ? $json.suffixes : JSON.parse($json.suffixes || '[]'), keywordMode: $json.keywordMode || 'or' }) }}",
+        "jsonBody": "={{ JSON.stringify({ keywords: Array.isArray($json.keywords) ? $json.keywords : JSON.parse($json.keywords || JSON.stringify([$json.industry])), area: $json.area, maxResults: parseInt($json.maxResults) ?? 1000, suffixes: Array.isArray($json.suffixes) ? $json.suffixes : JSON.parse($json.suffixes || '[]'), keywordMode: $json.keywordMode || 'or' }) }}",
         "options": {}
       },
       "id": "google-search",

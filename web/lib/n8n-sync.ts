@@ -4,9 +4,9 @@
  * even if the browser was closed during execution.
  */
 
-import { getProjects, getRunsForProject, updateRunStatus, rollupBatchRun } from './project-manager'
+import { getAllProjectRuns, getProjectRun, updateRunStatus, rollupBatchRun } from './project-manager'
 import { markJobDone } from './run-queue'
-import { getExecution } from './n8n-client'
+import { findExecutionByRunId, getExecution } from './n8n-client'
 
 /** GPT-4o-mini pricing (USD per 1M tokens) */
 const PRICING = {
@@ -31,6 +31,13 @@ export async function syncRun(runId: string, n8nExecutionId: string): Promise<bo
     if (!exec.finished && exec.status !== 'error') return false
 
     const finalStatus = exec.status === 'success' ? 'success' : 'error'
+    const executionError = exec.data?.resultData?.error
+    const errorParts = [
+      executionError?.node?.name ? `${executionError.node.name}` : undefined,
+      executionError?.description,
+      executionError?.message,
+    ].filter((part): part is string => Boolean(part))
+    const errorMessage = [...new Set(errorParts)].join(': ') || 'n8nワークフローの実行に失敗しました'
 
     // Extract token usage from n8n execution data if available
     let tokensInput: number | undefined
@@ -67,7 +74,13 @@ export async function syncRun(runId: string, n8nExecutionId: string): Promise<bo
       tokensOutput,
       estimatedCostUsd,
       completedAt: exec.stoppedAt ?? new Date().toISOString(),
+      error: finalStatus === 'error' ? errorMessage : undefined,
     })
+
+    const completedRun = await getProjectRun(runId)
+    if (completedRun?.parentRunId) {
+      await rollupBatchRun(completedRun.parentRunId)
+    }
 
     // Also mark the queue job as done and trigger next
     const nextJob = await markJobDone(runId, finalStatus === 'success' ? 'completed' : 'failed')
@@ -87,30 +100,32 @@ export async function syncRun(runId: string, n8nExecutionId: string): Promise<bo
  * Designed to be called on-demand (e.g., when loading history/project pages).
  */
 export async function syncAllRunningJobs(): Promise<{ synced: number }> {
-  const projects = await getProjects()
   let synced = 0
 
-  const runsLists = await Promise.all(projects.map((p) => getRunsForProject(p.id)))
+  const runs = await getAllProjectRuns()
   await Promise.allSettled(
-    runsLists.flatMap((runs) =>
-      runs
-        .filter((r) => r.status === 'running')
-        .map(async (r) => {
-          if (r.runType === 'batch') {
-            // Batch parents have no n8nExecutionId — derive status from children
-            try {
-              await rollupBatchRun(r.id)
-              synced++
-            } catch {
-              // best-effort
-            }
-            return
+    runs
+      .filter((r) => r.status === 'running' || r.status === 'pending')
+      .map(async (r) => {
+        if (r.runType === 'batch') {
+          // Batch parents have no n8nExecutionId — derive status from children
+          try {
+            await rollupBatchRun(r.id)
+            synced++
+          } catch {
+            // best-effort
           }
-          if (!r.n8nExecutionId) return
-          const changed = await syncRun(r.id, r.n8nExecutionId)
-          if (changed) synced++
-        })
-    )
+          return
+        }
+        const executionId = r.n8nExecutionId
+          ?? (await findExecutionByRunId(r.id).catch(() => undefined))?.id
+        if (!executionId) return
+        if (!r.n8nExecutionId) {
+          await updateRunStatus(r.id, 'running', executionId)
+        }
+        const changed = await syncRun(r.id, executionId)
+        if (changed) synced++
+      })
   )
 
   return { synced }

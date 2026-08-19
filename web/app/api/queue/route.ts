@@ -1,15 +1,32 @@
 import { NextResponse } from 'next/server'
 import { getQueueStatus, MAX_CONCURRENT } from '@/lib/run-queue'
+import { getErrorMessage, isMissingDatabaseSchemaError } from '@/lib/error-message'
+import { isSupabaseConfigured } from '@/lib/db'
 
 export const dynamic = 'force-dynamic'
 
 /** GET /api/queue — キュー全体の状態を返す */
 export async function GET() {
+  if (!isSupabaseConfigured()) {
+    return NextResponse.json({
+      success: true,
+      data: { active: 0, waiting: 0, maxConcurrent: MAX_CONCURRENT, recentJobs: [] },
+      localMode: true,
+    })
+  }
+
   try {
     const status = await getQueueStatus()
     return NextResponse.json({ success: true, data: status })
   } catch (e) {
-    return NextResponse.json({ success: false, error: String(e) }, { status: 500 })
+    if (isMissingDatabaseSchemaError(e)) {
+      return NextResponse.json({
+        success: true,
+        data: { active: 0, waiting: 0, maxConcurrent: MAX_CONCURRENT, recentJobs: [] },
+        setupRequired: true,
+      })
+    }
+    return NextResponse.json({ success: false, error: getErrorMessage(e) }, { status: 500 })
   }
 }
 

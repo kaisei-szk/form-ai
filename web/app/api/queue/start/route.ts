@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { triggerWorkflow } from '@/lib/n8n-client'
-import { updateRunStatus } from '@/lib/project-manager'
+import { getProjectRun, rollupBatchRun, updateRunStatus } from '@/lib/project-manager'
 import { markJobDone } from '@/lib/run-queue'
+import { getErrorMessage } from '@/lib/error-message'
 import type { ExecuteParams } from '@/lib/types'
 
 const Schema = z.object({
@@ -12,7 +13,10 @@ const Schema = z.object({
     area: z.string(),
     areas: z.array(z.string()).optional(),
     keywords: z.array(z.string()).optional(),
+    keywordMode: z.enum(['or', 'and']).optional(),
+    suffixes: z.array(z.string()).optional(),
     maxResults: z.number().optional(),
+    searchProvider: z.enum(['serper', 'places']).optional(),
     projectId: z.string(),
     runId: z.string(),
     searchMode: z.enum(['prefecture', 'radius']).optional(),
@@ -33,15 +37,31 @@ export async function POST(req: NextRequest) {
 
     try {
       const result = await triggerWorkflow(execParams)
-      updateRunStatus(runId, 'running', result.executionId)
+      await updateRunStatus(runId, 'running', result.executionId)
+      const run = await getProjectRun(runId)
+      if (run?.parentRunId) await updateRunStatus(run.parentRunId, 'running')
       return NextResponse.json({ success: true, executionId: result.executionId })
     } catch (triggerErr) {
       // Trigger failed — mark both run and queue job as failed
-      updateRunStatus(runId, 'error')
-      markJobDone(runId, 'failed', String(triggerErr))
-      return NextResponse.json({ success: false, error: String(triggerErr) }, { status: 502 })
+      const error = getErrorMessage(triggerErr, 'n8nの起動に失敗しました')
+      await updateRunStatus(runId, 'error', undefined, 0, {
+        completedAt: new Date().toISOString(),
+        error,
+      })
+      const failedRun = await getProjectRun(runId)
+      if (failedRun?.parentRunId) await rollupBatchRun(failedRun.parentRunId)
+      const next = await markJobDone(runId, 'failed', error)
+      if (next) {
+        const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3000'
+        fetch(`${base}/api/queue/start`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ runId: next.runId, params: next.params }),
+        }).catch(() => {})
+      }
+      return NextResponse.json({ success: false, error }, { status: 502 })
     }
   } catch (e) {
-    return NextResponse.json({ success: false, error: String(e) }, { status: 400 })
+    return NextResponse.json({ success: false, error: getErrorMessage(e) }, { status: 400 })
   }
 }

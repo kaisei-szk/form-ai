@@ -22,6 +22,7 @@ export interface SearchTarget {
   areas?: string[]  // individual prefectures for multi-area runs (for accurate retry)
   keywords: string[]
   keywordMode?: KeywordMode  // 'or' (default, union of keywords) or 'and' (all keywords must match)
+  searchProvider?: SearchProvider
   maxResults: number
   // Radius (map-based) mode fields — optional, only set when searchMode = 'radius'
   searchMode?: 'prefecture' | 'radius'
@@ -148,6 +149,12 @@ export interface N8nExecution {
   data?: {
     resultData?: {
       runData?: Record<string, unknown[]>
+      error?: {
+        message?: string
+        description?: string
+        node?: { name?: string }
+        httpCode?: string
+      }
     }
   }
 }

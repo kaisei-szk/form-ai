@@ -43,7 +43,10 @@ async function recoverStaleActiveJobs(): Promise<void> {
         .eq('id', job.id)
       if (updateError) throw updateError
       if (existingRun && existingRun.status !== 'error') {
-        await updateRunStatus(job.runId, 'error')
+        await updateRunStatus(job.runId, 'error', existingRun.n8nExecutionId, existingRun.itemsWritten, {
+          completedAt: new Date().toISOString(),
+          error: 'Webサーバー再起動のため実行状態を復旧できませんでした',
+        })
       }
     }
   }
@@ -97,7 +100,7 @@ export async function markJobActive(runId: string): Promise<void> {
     .from('queue_jobs')
     .update({ status: 'active', started_at: new Date().toISOString() })
     .eq('run_id', runId)
-    .eq('status', 'waiting')
+    .in('status', ['waiting', 'active'])
   if (error) throw error
 }
 

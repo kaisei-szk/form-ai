@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getErrorMessage, isMissingDatabaseSchemaError } from '@/lib/error-message'
+import { isSupabaseConfigured } from '@/lib/db'
 import { getCompanies, countCompaniesAndFormCount, getDistinctValues } from '@/lib/companies-db'
 import type { Company, CompanySortBy, CompanySortDir } from '@/lib/companies-db'
 import type { CompanyRow } from '@/lib/types'
@@ -26,6 +28,22 @@ function toRow(c: Company): CompanyRow {
 }
 
 export async function GET(req: NextRequest) {
+  if (!isSupabaseConfigured()) {
+    return NextResponse.json({
+      success: true,
+      data: [] as CompanyRow[],
+      total: 0,
+      formCount: 0,
+      phoneCount: 0,
+      emailCount: 0,
+      page: 1,
+      limit: 100,
+      industries: [],
+      areas: [],
+      localMode: true,
+    })
+  }
+
   const { searchParams } = req.nextUrl
   const page = Math.max(1, parseInt(searchParams.get('page') || '1', 10))
   const limit = Math.min(500, Math.max(1, parseInt(searchParams.get('limit') || '100', 10)))
@@ -63,7 +81,22 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ success: true, data, total, formCount, phoneCount, emailCount, page, limit, industries, areas })
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
+    if (isMissingDatabaseSchemaError(e)) {
+      return NextResponse.json({
+        success: true,
+        data: [] as CompanyRow[],
+        total: 0,
+        formCount: 0,
+        phoneCount: 0,
+        emailCount: 0,
+        page,
+        limit,
+        industries: [],
+        areas: [],
+        setupRequired: true,
+      })
+    }
+    const msg = getErrorMessage(e)
     return NextResponse.json({ success: false, error: msg, data: [] as CompanyRow[] }, { status: 500 })
   }
 }

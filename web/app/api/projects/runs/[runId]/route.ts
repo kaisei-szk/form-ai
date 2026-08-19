@@ -1,20 +1,48 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getProjectRun, updateRunStatus, deleteRun } from '@/lib/project-manager'
-import { getQueuePosition, markJobDone } from '@/lib/run-queue'
+import { getJobByRunId, getQueuePosition, markJobDone } from '@/lib/run-queue'
+import { findExecutionByRunId } from '@/lib/n8n-client'
+import { syncRun } from '@/lib/n8n-sync'
 import { removeByRunId } from '@/lib/companies-db'
+import { getErrorMessage } from '@/lib/error-message'
 import { z } from 'zod'
 
 export async function GET(_req: NextRequest, { params }: { params: { runId: string } }) {
   try {
-    const run = await getProjectRun(params.runId)
+    let run = await getProjectRun(params.runId)
     if (!run) return NextResponse.json({ success: false, error: 'Not found' }, { status: 404 })
+
+    // Completion callback前にn8nが失敗した場合も、個別ポーリングだけで
+    // runningのまま残らないよう実行IDと最終状態を照合する。
+    if (run.status === 'pending' || run.status === 'running') {
+      try {
+        const job = await getJobByRunId(params.runId)
+        if (job?.status === 'failed') {
+          await updateRunStatus(params.runId, 'error', run.n8nExecutionId, run.itemsWritten, {
+            completedAt: job.completedAt ?? new Date().toISOString(),
+            error: job.error ?? 'キュージョブの開始に失敗しました',
+          })
+        } else {
+          const executionId = run.n8nExecutionId
+            ?? (await findExecutionByRunId(params.runId))?.id
+          if (executionId) {
+            if (!run.n8nExecutionId) await updateRunStatus(params.runId, 'running', executionId)
+            await syncRun(params.runId, executionId)
+          }
+        }
+        run = await getProjectRun(params.runId) ?? run
+      } catch {
+        // n8nの一時的な通信エラーではDBにある直近状態を返す。
+      }
+    }
+
     // Attach live queue position so the execute panel can show correct status
     const queuePosition = (run.status === 'pending' || run.status === 'running')
       ? await getQueuePosition(params.runId)
       : 0
     return NextResponse.json({ success: true, data: { ...run, queuePosition } })
   } catch (e) {
-    return NextResponse.json({ success: false, error: String(e) }, { status: 500 })
+    return NextResponse.json({ success: false, error: getErrorMessage(e) }, { status: 500 })
   }
 }
 
@@ -27,6 +55,7 @@ const PatchSchema = z.object({
   estimatedCostUsd: z.number().optional(),
   completedAt: z.string().optional(),
   rawSearchCount: z.number().int().optional(),
+  error: z.string().optional(),
 })
 
 export async function PATCH(req: NextRequest, { params }: { params: { runId: string } }) {
@@ -38,6 +67,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { runId: str
       estimatedCostUsd: body.estimatedCostUsd,
       completedAt: body.completedAt,
       rawSearchCount: body.rawSearchCount,
+      error: body.status === 'error' ? (body.error ?? 'ユーザーによりキャンセルされました') : undefined,
     })
 
     // When a run is manually canceled (set to 'error'), advance the queue so waiting
@@ -58,7 +88,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { runId: str
     const run = await getProjectRun(params.runId)
     return NextResponse.json({ success: true, data: run })
   } catch (e) {
-    return NextResponse.json({ success: false, error: String(e) }, { status: 400 })
+    return NextResponse.json({ success: false, error: getErrorMessage(e) }, { status: 400 })
   }
 }
 
@@ -78,6 +108,6 @@ export async function DELETE(_req: NextRequest, { params }: { params: { runId: s
     await deleteRun(params.runId)
     return NextResponse.json({ success: true, companiesRemoved })
   } catch (e) {
-    return NextResponse.json({ success: false, error: String(e) }, { status: 500 })
+    return NextResponse.json({ success: false, error: getErrorMessage(e) }, { status: 500 })
   }
 }
