@@ -5,6 +5,8 @@ import * as zlib from 'zlib'
 import { URL } from 'url'
 import { z } from 'zod'
 import OpenAI from 'openai'
+import { countCompanies, upsertRunCompanies } from '@/lib/companies-db'
+import { getProjectRun, updateRunStatus } from '@/lib/project-manager'
 import {
   evaluateCandidateRelevance,
   isAddressInArea,
@@ -20,6 +22,26 @@ export const maxDuration = 300
 // prevent runaway memory / CPU usage when n8n fires multiple webhooks.
 const MAX_CONCURRENT_BATCHES = 3
 let _activeBatches = 0
+const _batchWaiters: Array<() => void> = []
+
+async function acquireBatchSlot(): Promise<void> {
+  if (_activeBatches < MAX_CONCURRENT_BATCHES) {
+    _activeBatches++
+    return
+  }
+  await new Promise<void>((resolve) => _batchWaiters.push(resolve))
+}
+
+function releaseBatchSlot(): void {
+  const next = _batchWaiters.shift()
+  if (next) {
+    // The active slot is handed directly to the next waiter, so the count does
+    // not change between jobs.
+    next()
+    return
+  }
+  _activeBatches = Math.max(0, _activeBatches - 1)
+}
 
 // ── Per-IP sliding-window rate limiter ─────────────────────────────
 // Limits the scrape endpoint to RATE_LIMIT_MAX calls per RATE_LIMIT_WINDOW_MS
@@ -209,6 +231,7 @@ const CandidateSchema = z.object({
   area: z.string().default(''),
   searchArea: z.string().optional(),
   source: z.enum(['places', 'organic', 'portal']).optional(),
+  sourceName: z.string().optional(),
   sourceTitle: z.string().optional(),
   sourceSnippet: z.string().optional(),
   sourceAddress: z.string().optional(),
@@ -219,7 +242,12 @@ const CandidateSchema = z.object({
 type CandidateInput = z.infer<typeof CandidateSchema>
 
 const Schema = z.object({
-  items: z.array(CandidateSchema).min(1).max(3000), // safety cap: prevent OOM from oversized requests
+  // An empty terminal batch is valid: it lets n8n complete a search that
+  // produced zero candidates instead of leaving the run stuck forever.
+  items: z.array(CandidateSchema).max(3000), // safety cap: prevent OOM from oversized requests
+  runId: z.string().optional(),
+  projectId: z.string().optional(),
+  batchId: z.string().optional(),
   timeoutMs: z.number().int().min(1000).max(30000).default(8000),
   concurrency: z.number().int().min(1).max(100).default(30),
   fetchFormPage: z.boolean().default(true), // also fetch the detected form page
@@ -2054,16 +2082,13 @@ export async function POST(req: NextRequest) {
       { status: 429, headers: { 'Retry-After': String(retryAfterSec), 'X-RateLimit-Remaining': '0' } }
     )
   }
-  if (_activeBatches >= MAX_CONCURRENT_BATCHES) {
-    return NextResponse.json(
-      { success: false, error: 'Server busy — too many concurrent scraping jobs. Retry in a few seconds.' },
-      { status: 429, headers: { 'Retry-After': '5' } }
-    )
-  }
-  _activeBatches++
+  // Do not reject a valid batch merely because three other batches are active.
+  // Waiting preserves every input candidate; n8n's request timeout is long
+  // enough for the bounded queue to drain.
+  await acquireBatchSlot()
   try {
     const body = Schema.parse(await req.json())
-    const { items, timeoutMs, concurrency, fetchFormPage } = body
+    const { items, timeoutMs, concurrency, fetchFormPage, runId, projectId, batchId } = body
 
     const startMs = Date.now()
     const rawResults = await processBatch(items, timeoutMs, concurrency, fetchFormPage)
@@ -2178,6 +2203,41 @@ export async function POST(req: NextRequest) {
       ...result
     }) => result)
 
+    let persistedCount: number | undefined
+    let batchSavedCount = 0
+    if (runId && projectId) {
+      const run = await getProjectRun(runId)
+      const canceled = run?.status === 'error' && run.error?.includes('キャンセル')
+      if (!canceled) {
+        const candidateByUrl = new Map(items.map((candidate) => [candidate.url, candidate]))
+        const companies = responseResults.map((result) => {
+          const candidate = candidateByUrl.get(result.url)
+          return {
+            name: candidate?.sourceName || candidate?.sourceTitle || result.formPageTitle || '',
+            hpUrl: result.url,
+            formUrl: result.formUrl || '',
+            phone: result.phone || candidate?.sourcePhone || '',
+            email: result.email || '',
+            address: result.address || candidate?.sourceAddress || '',
+            industry: candidate?.industry || '',
+            area: candidate?.searchArea || candidate?.area || '',
+            formType: result.formTypeHint || '',
+            status: '未送信',
+            notes: '',
+            projectId,
+            runId,
+            collectedAt: new Date().toISOString(),
+          }
+        })
+        const saved = await upsertRunCompanies(companies)
+        batchSavedCount = saved.saved
+        persistedCount = await countCompanies({ runId })
+        if (run?.status === 'pending' || run?.status === 'running') {
+          await updateRunStatus(runId, 'running', run.n8nExecutionId, persistedCount)
+        }
+      }
+    }
+
     const successCount  = responseResults.filter((r) => r.error === null).length
     const formFoundCount = responseResults.filter((r) => r.hasContactLink).length
     const inquiryCount  = responseResults.filter((r) => r.formTypeHint === 'inquiry').length
@@ -2186,7 +2246,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       results: responseResults,
+      decisions: evaluatedResults.map((result, index) => ({
+        url: result.url,
+        source: items[index]?.source,
+        title: items[index]?.sourceName || items[index]?.sourceTitle || '',
+        status: result.relevance.status,
+        reasons: result.relevance.reasons,
+        error: result.error,
+      })),
       meta: {
+        batchId: batchId || '',
         total: responseResults.length,
         searchedCandidateCount: items.length,
         fetchedCount: rawResults.filter((r) => r.error === null).length,
@@ -2196,13 +2265,11 @@ export async function POST(req: NextRequest) {
         relevanceReasonCounts,
         fetchErrorSamples: rawResults
           .filter((result) => result.error)
-          .slice(0, 30)
           .map((result) => ({ url: result.url, error: result.error })),
         rejectionSamples: evaluatedResults
           .flatMap((result, index) => result.relevance.status === 'rejected'
             ? [{ result, candidate: items[index] }]
             : [])
-          .slice(0, 50)
           .map(({ result, candidate }) => ({
             url: result.url,
             source: candidate.source,
@@ -2213,7 +2280,6 @@ export async function POST(req: NextRequest) {
           .flatMap((result, index) => result.relevance.status === 'hold'
             ? [{ result, candidate: items[index] }]
             : [])
-          .slice(0, 50)
           .map(({ result, candidate }) => ({
             url: result.url,
             source: candidate.source,
@@ -2229,11 +2295,16 @@ export async function POST(req: NextRequest) {
         gptClassified,
         inquiryCount,
         unknownCount,
+        batchSavedCount,
+        persistedCount,
       },
     })
   } catch (e) {
-    return NextResponse.json({ success: false, error: String(e) }, { status: 400 })
+    return NextResponse.json(
+      { success: false, error: String(e) },
+      { status: e instanceof z.ZodError ? 400 : 500 },
+    )
   } finally {
-    _activeBatches--
+    releaseBatchSlot()
   }
 }

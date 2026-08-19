@@ -357,6 +357,14 @@ export default function ProjectResultsPage() {
     try {
       const params = new URLSearchParams()
       params.set('projectId', projectId)
+      if (selectedRunId) {
+        const run = project?.runs.find((r) => r.id === selectedRunId) as (ProjectRun & { childRunIds?: string[] }) | undefined
+        if (run?.childRunIds?.length) {
+          params.set('runIds', [selectedRunId, ...run.childRunIds].join(','))
+        } else {
+          params.set('runId', selectedRunId)
+        }
+      }
       if (filters.industry) params.set('industry', filters.industry)
       if (filters.area) params.set('area', filters.area)
       if (filters.status) params.set('status', filters.status)
@@ -397,6 +405,16 @@ export default function ProjectResultsPage() {
     }
   }
   const hasFilters = filters.industry || filters.area || filters.status || filters.formType || filters.hasForm || filters.hasPhone || filters.hasEmail || filters.search
+  const progressRun = selectedRunId
+    ? project?.runs.find((run) => run.id === selectedRunId)
+    : undefined
+  const expectedCandidateCount = progressRun?.results?.expectedCandidateCount
+    ?? progressRun?.rawSearchCount
+  const processedCandidateCount = progressRun?.results?.processedCandidateCount
+  const pendingCandidateCount = progressRun?.results?.pendingCandidateCount
+    ?? (expectedCandidateCount !== undefined && processedCandidateCount !== undefined
+      ? Math.max(0, expectedCandidateCount - processedCandidateCount)
+      : undefined)
 
   const handleCancelRun = async (runId: string) => {
     setCancelingRunId(runId)
@@ -756,6 +774,49 @@ export default function ProjectResultsPage() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {progressRun && (
+        <div className="bg-white rounded border border-gray-200 p-3 shadow-sm">
+          <div className="flex items-center justify-between gap-3 mb-2">
+            <div className="flex items-center gap-2">
+              {(progressRun.status === 'running' || progressRun.status === 'pending') && (
+                <RefreshCw className="w-3.5 h-3.5 text-blue-500 animate-spin" />
+              )}
+              <span className="text-xs font-medium text-gray-700">
+                {progressRun.status === 'pending'
+                  ? '開始待機中'
+                  : progressRun.status === 'running' && expectedCandidateCount === undefined
+                    ? '候補を検索中'
+                    : progressRun.status === 'running'
+                      ? '公式HP・フォームを確認中'
+                      : progressRun.results?.resultSetComplete === false
+                        ? '一部未処理のため要確認'
+                        : '処理結果'}
+              </span>
+            </div>
+            {progressRun.results?.resultSetComplete === true && (
+              <span className="text-[11px] text-green-700 bg-green-50 border border-green-200 rounded px-2 py-0.5">
+                全候補の処理を確認済み
+              </span>
+            )}
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            <ProgressMetric label="発見候補" value={expectedCandidateCount} />
+            <ProgressMetric label="公式HP保存済み" value={progressRun.itemsWritten ?? 0} tone="green" />
+            <ProgressMetric label="処理済み" value={processedCandidateCount} />
+            <ProgressMetric
+              label="未処理"
+              value={pendingCandidateCount}
+              tone={pendingCandidateCount && pendingCandidateCount > 0 ? 'amber' : undefined}
+            />
+          </div>
+          {progressRun.results?.resultSetComplete === false && (
+            <p className="mt-2 text-xs text-amber-700">
+              取得済みの公式HPは表示していますが、未処理候補が残っているため完全終了にはしていません。
+            </p>
+          )}
         </div>
       )}
 
@@ -1384,6 +1445,30 @@ function CopyButton({ text }: { text: string }) {
         : <Copy className="w-3 h-3" />
       }
     </button>
+  )
+}
+
+function ProgressMetric({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: number | undefined
+  tone?: 'green' | 'amber'
+}) {
+  const color = tone === 'green'
+    ? 'text-green-700'
+    : tone === 'amber'
+      ? 'text-amber-700'
+      : 'text-gray-800'
+  return (
+    <div className="rounded border border-gray-100 bg-gray-50 px-3 py-2">
+      <div className="text-[11px] text-gray-500">{label}</div>
+      <div className={`text-base font-semibold tabular-nums ${color}`}>
+        {value === undefined ? '—' : value.toLocaleString()}
+      </div>
+    </div>
   )
 }
 

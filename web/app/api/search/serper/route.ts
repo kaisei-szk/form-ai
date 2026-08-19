@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { runSerperSearch, extractHost } from '@/lib/serper'
 import { runPortalDiscovery, businessDedupeKey, type PortalDiscoveryStats } from '@/lib/portal-discovery'
 import { validateAreaInput } from '@/lib/search-relevance'
+import { getProjectRun, updateRunStatus } from '@/lib/project-manager'
 
 export const maxDuration = 300
 
@@ -101,6 +102,22 @@ export async function POST(req: NextRequest) {
     }
 
     stats.candidateCount = items.length
+
+    // Publish discovery progress before scraping starts. This makes the result
+    // count visible immediately and survives a later n8n/callback failure.
+    if (body.runId) {
+      const run = await getProjectRun(body.runId)
+      const canceled = run?.status === 'error' && run.error?.includes('キャンセル')
+      if (!canceled && run) {
+        await updateRunStatus(
+          body.runId,
+          'running',
+          run.n8nExecutionId,
+          run.itemsWritten,
+          { rawSearchCount: items.length },
+        )
+      }
+    }
 
     return NextResponse.json({
       success: true,

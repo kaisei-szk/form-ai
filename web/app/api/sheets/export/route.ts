@@ -40,6 +40,8 @@ export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl
   const projectId = searchParams.get('projectId') || undefined
   const runId = searchParams.get('runId') || undefined
+  const runIdsRaw = searchParams.get('runIds')
+  const runIds = runIdsRaw ? runIdsRaw.split(',').filter(Boolean) : undefined
 
   const idsParam = searchParams.get('ids')
   const ids = idsParam ? idsParam.split(',').filter(Boolean) : undefined
@@ -47,6 +49,7 @@ export async function GET(req: NextRequest) {
   const filters = {
     projectId,
     runId,
+    runIds,
     industry: searchParams.get('industry') || undefined,
     area:     searchParams.get('area') || undefined,
     status:   searchParams.get('status') || undefined,

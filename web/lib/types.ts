@@ -89,6 +89,13 @@ export interface BenchmarkResults {
   searchTimeBudgetReached?: boolean
   searchElapsedMs?: number
   relevanceReasonCounts?: Record<string, number>
+  expectedCandidateCount?: number
+  processedCandidateCount?: number
+  pendingCandidateCount?: number
+  batchCount?: number
+  completedBatchCount?: number
+  failedBatchCount?: number
+  resultSetComplete?: boolean
   warnings?: string[]
 }
 

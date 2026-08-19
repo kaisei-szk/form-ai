@@ -1,4 +1,5 @@
 {
+  "id": "Gl5wcMERusfRXgNd",
   "name": "リスト収集AI - 企業フォーム自動探索",
   "nodes": [
     {
@@ -104,6 +105,38 @@
       "typeVersion": 3.4,
       "position": [
         420,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.WEB_CALLBACK_URL + \"/api/projects/runs/\" + $json.runId + \"/started\" }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ...$json, n8nExecutionId: String($execution.id) }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "register-execution",
+      "name": "n8n実行ID登録",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "position": [
+        540,
         240
       ]
     },
@@ -333,6 +366,9 @@
         240
       ],
       "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000,
       "parameters": {
         "method": "POST",
         "url": "={{ $env.WEB_CALLBACK_URL + \"/api/scrape-forms-bulk\" }}",
@@ -356,7 +392,7 @@
             }
           }
         },
-        "jsonBody": "={{ ({ items: $json.urlItems, timeoutMs: 8000, concurrency: 20, fetchFormPage: true }) }}"
+        "jsonBody": "={{ ({ items: $json.urlItems, runId: $json.runId, projectId: $json.projectId, batchId: $json.batchId, timeoutMs: 8000, concurrency: 20, fetchFormPage: true }) }}"
       }
     },
     {
@@ -370,7 +406,7 @@
       ],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "\n// Serper候補と検索根拠をまとめ、タイムアウトを避けるため分割してscrape APIへ渡す\nconst items = $input.all();\nconst p = $('L-01: 検索パラメータ設定').first().json;\nconst keywords = Array.isArray(p.keywords) ? p.keywords : JSON.parse(p.keywords || '[]');\nlet rawItems = [];\ntry { rawItems = $('検索結果を分割').all().map(i => i.json); } catch(e) {}\nconst rawByUrl = new Map(rawItems.filter(r => r.link).map(r => [r.link, r]));\nconst records = items.map(({ json: c }) => {\n  const raw = rawByUrl.get(c.companyUrl) || {};\n  return {\n    company: c,\n    urlItem: {\n      url: c.companyUrl || '',\n      baseUrl: c.companyUrl || '',\n      industry: p.industry || '',\n      keywords,\n      area: p.area || '',\n      searchArea: raw.area || p.area || '',\n      source: raw.source || undefined,\n      sourceTitle: raw.title || c.companyName || '',\n      sourceSnippet: raw.snippet || '',\n      sourceAddress: raw.address || '',\n      sourcePhone: raw.phone || '',\n      sourceCategory: raw.category || '',\n    },\n  };\n}).filter(record => record.urlItem.url);\n\nconst BATCH_SIZE = 150;\nconst batches = [];\nfor (let offset = 0; offset < records.length; offset += BATCH_SIZE) {\n  const batch = records.slice(offset, offset + BATCH_SIZE);\n  batches.push({ json: {\n    urlItems: batch.map(record => record.urlItem),\n    companies: batch.map(record => record.company),\n  }});\n}\nreturn batches;\n"
+        "jsCode": "\n// Serper候補と検索根拠をまとめ、欠落確認できる安定ID付きバッチへ分割する\nconst items = $input.all();\nconst p = $('L-01: 検索パラメータ設定').first().json;\nconst keywords = Array.isArray(p.keywords) ? p.keywords : JSON.parse(p.keywords || '[]');\nlet rawItems = [];\ntry { rawItems = $('検索結果を分割').all().map(i => i.json); } catch(e) {}\nconst rawByUrl = new Map(rawItems.filter(r => r.link).map(r => [r.link, r]));\nconst records = items.map(({ json: c }) => {\n  const raw = rawByUrl.get(c.companyUrl) || {};\n  return {\n    company: c,\n    urlItem: {\n      url: c.companyUrl || '',\n      baseUrl: c.companyUrl || '',\n      industry: p.industry || '',\n      keywords,\n      area: p.area || '',\n      searchArea: raw.area || p.area || '',\n      source: raw.source || undefined,\n      sourceName: c.companyName || raw.title || '',\n      sourceTitle: raw.title || c.companyName || '',\n      sourceSnippet: raw.snippet || '',\n      sourceAddress: raw.address || '',\n      sourcePhone: raw.phone || '',\n      sourceCategory: raw.category || '',\n    },\n  };\n}).filter(record => record.urlItem.url);\n\nconst BATCH_SIZE = 150;\nconst batches = [];\nfor (let offset = 0; offset < records.length; offset += BATCH_SIZE) {\n  const batch = records.slice(offset, offset + BATCH_SIZE);\n  const sequence = batches.length + 1;\n  batches.push({ json: {\n    batchId: `${p.runId || 'run'}:${String(sequence).padStart(4, '0')}`,\n    runId: p.runId || '',\n    projectId: p.projectId || '',\n    urlItems: batch.map(record => record.urlItem),\n    companies: batch.map(record => record.company),\n  }});\n}\nif (!batches.length) {\n  batches.push({ json: {\n    batchId: `${p.runId || 'run'}:0001`,\n    runId: p.runId || '',\n    projectId: p.projectId || '',\n    urlItems: [],\n    companies: [],\n  }});\n}\nreturn batches;\n"
       }
     },
     {
@@ -385,7 +421,7 @@
       ],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// 全スクレイプAPIバッチの結果を展開\nconst allInput = $input.all();\nif (!allInput.length) return [];\nconst results = allInput.flatMap(item => item.json.results || []);\nif (!results.length) return [];\n\nlet companies = [];\ntry {\n  companies = $('URL収集').all().flatMap(item => item.json.companies || []);\n} catch(e) {}\n\nconst companyMap = {};\nfor (const c of companies) {\n  if (c.companyUrl) companyMap[c.companyUrl] = c;\n}\n\nreturn results\n  .filter(r => r.url || r.baseUrl)\n  .map(r => {\n    const origUrl = r.url || r.baseUrl || '';\n    const orig = companyMap[origUrl] || {};\n    return { json: {\n      companyUrl: origUrl,\n      companyName: orig.companyName || r.companyName || '',\n      keyword: orig.keyword || '',\n      formUrl: r.formUrl || null,\n      email: r.email || null,\n      phone: r.phone || null,\n      address: r.address || null,\n      hasContactLink: r.hasContactLink || false,\n      contactLinks: r.contactLinks || [],\n      formPageTitle: r.formPageTitle || '',\n      formTypeHint: r.formTypeHint || 'unknown',\n      error: r.error || null,\n    } };\n  });"
+        "jsCode": "// 全スクレイプAPIバッチの結果を展開\nconst allInput = $input.all();\nif (!allInput.length) return [];\nconst results = allInput.flatMap(item => item.json.results || []);\nif (!results.length) return [{ json: { noAcceptedResults: true } }];\n\nlet companies = [];\ntry {\n  companies = $('URL収集').all().flatMap(item => item.json.companies || []);\n} catch(e) {}\n\nconst companyMap = {};\nfor (const c of companies) {\n  if (c.companyUrl) companyMap[c.companyUrl] = c;\n}\n\nreturn results\n  .filter(r => r.url || r.baseUrl)\n  .map(r => {\n    const origUrl = r.url || r.baseUrl || '';\n    const orig = companyMap[origUrl] || {};\n    return { json: {\n      companyUrl: origUrl,\n      companyName: orig.companyName || r.companyName || '',\n      keyword: orig.keyword || '',\n      formUrl: r.formUrl || null,\n      email: r.email || null,\n      phone: r.phone || null,\n      address: r.address || null,\n      hasContactLink: r.hasContactLink || false,\n      contactLinks: r.contactLinks || [],\n      formPageTitle: r.formPageTitle || '',\n      formTypeHint: r.formTypeHint || 'unknown',\n      error: r.error || null,\n    } };\n  });"
       }
     },
     {
@@ -403,11 +439,14 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ status: $json.status, error: $json.error, companies: $json.companies, tokensInput: 0, tokensOutput: 0, model: 'gpt-4o-mini', results: $json.results }) }}",
+        "jsonBody": "={{ JSON.stringify({ status: $json.status, error: $json.error, tokensInput: 0, tokensOutput: 0, model: 'gpt-4o-mini', results: $json.results }) }}",
         "options": {
           "timeout": 600000
         }
       },
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000,
       "id": "callback-complete",
       "name": "コールバック（完了通知）",
       "type": "n8n-nodes-base.httpRequest",
@@ -420,7 +459,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "\nconst items = $input.all();\nconst p = $('L-01: 検索パラメータ設定').first().json;\nconst companies = items.map(i => ({\n  name: i.json[\"会社名\"] || \"\",\n  hpUrl: i.json[\"HP URL\"] || \"\",\n  formUrl: i.json[\"フォームURL\"] || \"\",\n  phone: i.json[\"電話番号\"] || \"\",\n  email: i.json[\"メールアドレス\"] || \"\",\n  industry: i.json[\"業種\"] || \"\",\n  area: i.json[\"エリア\"] || \"\",\n  formType: i.json[\"フォーム種別\"] || \"\",\n  status: i.json[\"ステータス\"] || \"未送信\",\n  projectId: i.json[\"プロジェクトID\"] || \"\",\n  runId: i.json[\"実行ID\"] || \"\",\n  collectedAt: i.json[\"収集日時\"] || \"\"\n})).filter(c => c.name || c.hpUrl);\nfunction nodeItems(name) {\n  try { return $(name).all().map(item => item.json || {}); } catch(e) { return []; }\n}\nconst search = nodeItems('L-02: Serper検索（公式HP候補取得）')[0] || {};\nconst scrapeItems = nodeItems('L-03: スクレイプAPI');\nconst metas = scrapeItems.map(item => item.meta).filter(Boolean);\nconst sum = key => metas.reduce((total, meta) => total + (Number(meta[key]) || 0), 0);\nconst failedScrape = scrapeItems.find(item => item.error);\nconst rawError = search.error || failedScrape?.error;\nconst error = rawError ? (typeof rawError === 'string' ? rawError : rawError.message || JSON.stringify(rawError)) : '';\nconst afterDedup = sum('relevanceAcceptedCount');\nconst formFoundCount = sum('formFoundCount');\nconst relevanceReasonCounts = {};\nfor (const meta of metas) {\n  for (const [reason, count] of Object.entries(meta.relevanceReasonCounts || {})) {\n    relevanceReasonCounts[reason] = (relevanceReasonCounts[reason] || 0) + (Number(count) || 0);\n  }\n}\nconst warningMessages = [];\nif (search.warning) warningMessages.push(String(search.warning));\nfor (const issue of (Array.isArray(search.errors) ? search.errors : [])) {\n  warningMessages.push(`Serper ${issue.status || ''}: ${issue.text || JSON.stringify(issue)}`.trim());\n}\nfor (const meta of metas) {\n  for (const issue of (Array.isArray(meta.fetchErrorSamples) ? meta.fetchErrorSamples : [])) {\n    warningMessages.push(`HP取得失敗 ${issue.url || ''}: ${issue.error || '不明'}`);\n  }\n}\nif (failedScrape?.error) warningMessages.push(`スクレイプAPI: ${typeof failedScrape.error === 'string' ? failedScrape.error : JSON.stringify(failedScrape.error)}`);\nconst results = {\n  totalCompanies: search.stats?.candidateCount ?? 0,\n  afterDedup,\n  successCount: sum('successCount'),\n  errorCount: sum('errorCount') + (failedScrape ? 1 : 0),\n  formFoundCount,\n  formFoundRate: Math.round((formFoundCount / Math.max(afterDedup, 1)) * 100),\n  queryCount: search.stats?.queriesExecuted ?? 0,\n  relevanceRejectedCount: sum('relevanceRejectedCount'),\n  searchFailedQueries: search.stats?.failedQueries ?? (search.error ? 1 : 0),\n  areaRejectedCount: search.stats?.areaRejectedCount ?? 0,\n  blockedDomainCount: search.stats?.blockedDomainCount ?? 0,\n  duplicateCandidateCount: search.stats?.duplicateCount ?? 0,\n  rawCandidateCount: search.stats?.rawCandidateCount ?? 0,\n  uniquePlaceCount: search.stats?.uniquePlaceCount ?? 0,\n  noWebsiteCount: search.stats?.noWebsiteCount ?? 0,\n  paginationRepeatCount: search.stats?.paginationRepeatCount ?? 0,\n  exhaustedQueryCount: search.stats?.exhaustedQueryCount ?? 0,\n  pageCapReachedQueryCount: search.stats?.pageCapReachedQueryCount ?? 0,\n  maxPages: search.stats?.maxPages ?? 1,\n  hpFetchFailureCount: sum('errorCount'),\n  placesCandidateCount: search.stats?.placesCandidateCount ?? 0,\n  organicCandidateCount: search.stats?.organicCandidateCount ?? 0,\n  organicRawCandidateCount: search.stats?.organicRawCandidateCount ?? 0,\n  organicRejectedCount: search.stats?.organicRejectedCount ?? 0,\n  organicQueriesExecuted: search.stats?.organicQueriesExecuted ?? 0,\n  organicFailedQueries: search.stats?.organicFailedQueries ?? 0,\n  organicExhaustedQueryCount: search.stats?.organicExhaustedQueryCount ?? 0,\n  organicPageCapReachedQueryCount: search.stats?.organicPageCapReachedQueryCount ?? 0,\n  organicMaxPages: search.stats?.organicMaxPages ?? 0,\n  searchTimeBudgetReached: search.stats?.searchTimeBudgetReached ?? false,\n  searchElapsedMs: search.stats?.searchElapsedMs ?? 0,\n  relevanceReasonCounts,\n  relevanceAcceptedCount: sum('relevanceAcceptedCount'),\n  relevanceHoldCount: sum('relevanceHoldCount'),\n  portalQueriesExecuted: search.portalStats?.portalQueriesExecuted ?? 0,\n  portalFailedQueries: search.portalStats?.portalFailedQueries ?? 0,\n  portalDiscoveryOrganicResults: search.portalStats?.discoveryOrganicResults ?? 0,\n  portalListingPagesFound: search.portalStats?.listingPagesFound ?? 0,\n  portalListingPagesFetched: search.portalStats?.listingPagesFetched ?? 0,\n  portalDetailPagesFetched: search.portalStats?.detailPagesFetched ?? 0,\n  portalBusinessesExtracted: search.portalStats?.businessesExtracted ?? 0,\n  portalDedupedBusinessCount: search.portalStats?.dedupedBusinessCount ?? 0,\n  portalOfficialLinkCount: search.portalStats?.officialLinkFromPortal ?? 0,\n  portalOfficialFoundByResearch: search.portalStats?.officialFoundByResearch ?? 0,\n  portalResearchQueriesExecuted: search.portalStats?.researchQueriesExecuted ?? 0,\n  portalFetchFailedCount: search.portalStats?.fetchFailedCount ?? 0,\n  portalDeadlineReached: search.portalStats?.deadlineReached ?? false,\n  hpNotFoundCount: search.hpNotFoundCount ?? 0,\n  hpNotFoundSaved: search.hpNotFoundSaved ?? 0,\n  warnings: [...new Set(warningMessages)].slice(0, 100),\n};\nreturn [{ json: { status: error ? 'error' : 'success', error: error || undefined, companies, runId: p.runId || '', results }, pairedItem: { item: 0 } }];\n"
+        "jsCode": "\nconst p = $('L-01: 検索パラメータ設定').first().json;\nfunction nodeItems(name) {\n  try { return $(name).all().map(item => item.json || {}); } catch(e) { return []; }\n}\nconst search = nodeItems('L-02: Serper検索（公式HP候補取得）')[0] || {};\nconst scrapeItems = nodeItems('L-03: スクレイプAPI');\nconst urlBatches = nodeItems('URL収集');\nconst metas = scrapeItems.filter(item => item.success === true && item.meta).map(item => item.meta);\nconst sum = key => metas.reduce((total, meta) => total + (Number(meta[key]) || 0), 0);\n\nconst totalCompanies = Number(search.stats?.candidateCount ?? search.count ?? 0) || 0;\nconst queuedCandidateCount = urlBatches.reduce(\n  (total, batch) => total + (Array.isArray(batch.urlItems) ? batch.urlItems.length : 0),\n  0\n);\nconst expectedCandidateCount = Math.max(totalCompanies, queuedCandidateCount);\nconst preScrapeResolvedCount = Math.max(0, expectedCandidateCount - queuedCandidateCount);\nconst scrapedProcessedCount = sum('searchedCandidateCount');\nconst processedCandidateCount = Math.min(\n  expectedCandidateCount,\n  preScrapeResolvedCount + scrapedProcessedCount\n);\nconst pendingCandidateCount = Math.max(0, expectedCandidateCount - processedCandidateCount);\nconst batchCount = urlBatches.length;\nconst completedBatchCount = metas.length;\nconst failedBatchCount = Math.max(0, batchCount - completedBatchCount);\nconst resultSetComplete = failedBatchCount === 0 && pendingCandidateCount === 0;\n\nconst failedScrapes = scrapeItems.filter(item => item.success !== true || !item.meta);\nconst errorParts = [];\nif (search.error) {\n  errorParts.push(typeof search.error === 'string'\n    ? search.error\n    : search.error.message || JSON.stringify(search.error));\n}\nif (failedBatchCount > 0) {\n  errorParts.push('スクレイプ失敗バッチ: ' + failedBatchCount + '/' + batchCount);\n}\nif (pendingCandidateCount > 0) {\n  errorParts.push('未処理候補: ' + pendingCandidateCount + '/' + expectedCandidateCount);\n}\nconst error = errorParts.join(' / ');\n\nconst afterDedup = sum('relevanceAcceptedCount');\nconst formFoundCount = sum('formFoundCount');\nconst relevanceReasonCounts = {};\nfor (const meta of metas) {\n  for (const [reason, count] of Object.entries(meta.relevanceReasonCounts || {})) {\n    relevanceReasonCounts[reason] = (relevanceReasonCounts[reason] || 0) + (Number(count) || 0);\n  }\n}\n\nconst warningMessages = [];\nif (search.warning) warningMessages.push(String(search.warning));\nfor (const issue of (Array.isArray(search.errors) ? search.errors : [])) {\n  warningMessages.push(\n    ('Serper ' + (issue.status || '') + ': ' + (issue.text || JSON.stringify(issue))).trim()\n  );\n}\nfor (const meta of metas) {\n  for (const issue of (Array.isArray(meta.fetchErrorSamples) ? meta.fetchErrorSamples : [])) {\n    warningMessages.push('HP取得失敗 ' + (issue.url || '') + ': ' + (issue.error || '不明'));\n  }\n}\nfor (const failed of failedScrapes) {\n  const detail = failed.error ?? failed.message ?? failed;\n  warningMessages.push(\n    'スクレイプAPI: ' + (typeof detail === 'string' ? detail : JSON.stringify(detail))\n  );\n}\n\nconst elapsedMs = sum('elapsedMs');\nconst results = {\n  totalCompanies,\n  afterDedup,\n  successCount: sum('successCount'),\n  errorCount: sum('errorCount') + failedBatchCount,\n  formFoundCount,\n  formFoundRate: Math.round((formFoundCount / Math.max(afterDedup, 1)) * 100),\n  elapsedMs,\n  avgMsPerItem: Math.round(elapsedMs / Math.max(processedCandidateCount, 1)),\n  queryCount: search.stats?.queriesExecuted ?? 0,\n  relevanceRejectedCount: sum('relevanceRejectedCount'),\n  searchFailedQueries: search.stats?.failedQueries ?? (search.error ? 1 : 0),\n  areaRejectedCount: search.stats?.areaRejectedCount ?? 0,\n  blockedDomainCount: search.stats?.blockedDomainCount ?? 0,\n  duplicateCandidateCount: search.stats?.duplicateCount ?? 0,\n  rawCandidateCount: search.stats?.rawCandidateCount ?? 0,\n  uniquePlaceCount: search.stats?.uniquePlaceCount ?? 0,\n  noWebsiteCount: search.stats?.noWebsiteCount ?? 0,\n  paginationRepeatCount: search.stats?.paginationRepeatCount ?? 0,\n  exhaustedQueryCount: search.stats?.exhaustedQueryCount ?? 0,\n  pageCapReachedQueryCount: search.stats?.pageCapReachedQueryCount ?? 0,\n  maxPages: search.stats?.maxPages ?? 1,\n  hpFetchFailureCount: sum('errorCount'),\n  placesCandidateCount: search.stats?.placesCandidateCount ?? 0,\n  organicCandidateCount: search.stats?.organicCandidateCount ?? 0,\n  organicRawCandidateCount: search.stats?.organicRawCandidateCount ?? 0,\n  organicRejectedCount: search.stats?.organicRejectedCount ?? 0,\n  organicQueriesExecuted: search.stats?.organicQueriesExecuted ?? 0,\n  organicFailedQueries: search.stats?.organicFailedQueries ?? 0,\n  organicExhaustedQueryCount: search.stats?.organicExhaustedQueryCount ?? 0,\n  organicPageCapReachedQueryCount: search.stats?.organicPageCapReachedQueryCount ?? 0,\n  organicMaxPages: search.stats?.organicMaxPages ?? 0,\n  searchTimeBudgetReached: search.stats?.searchTimeBudgetReached ?? false,\n  searchElapsedMs: search.stats?.searchElapsedMs ?? 0,\n  relevanceReasonCounts,\n  relevanceAcceptedCount: sum('relevanceAcceptedCount'),\n  relevanceHoldCount: sum('relevanceHoldCount'),\n  portalQueriesExecuted: search.portalStats?.portalQueriesExecuted ?? 0,\n  portalFailedQueries: search.portalStats?.portalFailedQueries ?? 0,\n  portalDiscoveryOrganicResults: search.portalStats?.discoveryOrganicResults ?? 0,\n  portalListingPagesFound: search.portalStats?.listingPagesFound ?? 0,\n  portalListingPagesFetched: search.portalStats?.listingPagesFetched ?? 0,\n  portalDetailPagesFetched: search.portalStats?.detailPagesFetched ?? 0,\n  portalBusinessesExtracted: search.portalStats?.businessesExtracted ?? 0,\n  portalDedupedBusinessCount: search.portalStats?.dedupedBusinessCount ?? 0,\n  portalOfficialLinkCount: search.portalStats?.officialLinkFromPortal ?? 0,\n  portalOfficialFoundByResearch: search.portalStats?.officialFoundByResearch ?? 0,\n  portalResearchQueriesExecuted: search.portalStats?.researchQueriesExecuted ?? 0,\n  portalFetchFailedCount: search.portalStats?.fetchFailedCount ?? 0,\n  portalDeadlineReached: search.portalStats?.deadlineReached ?? false,\n  hpNotFoundCount: search.hpNotFoundCount ?? 0,\n  hpNotFoundSaved: search.hpNotFoundSaved ?? 0,\n  expectedCandidateCount,\n  processedCandidateCount,\n  pendingCandidateCount,\n  batchCount,\n  completedBatchCount,\n  failedBatchCount,\n  resultSetComplete,\n  warnings: [...new Set(warningMessages)],\n};\nreturn [{\n  json: {\n    status: error || !resultSetComplete ? 'error' : 'success',\n    error: error || undefined,\n    runId: p.runId || '',\n    results,\n  },\n  pairedItem: { item: 0 },\n}];\n"
       },
       "id": "aggregate-results",
       "name": "結果集約",
@@ -456,6 +495,17 @@
       ]
     },
     "L-01: 検索パラメータ設定": {
+      "main": [
+        [
+          {
+            "node": "n8n実行ID登録",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "n8n実行ID登録": {
       "main": [
         [
           {
@@ -520,13 +570,7 @@
             "index": 0
           }
         ],
-        [
-          {
-            "node": "結果集約",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        []
       ]
     },
     "Webhook受信": {

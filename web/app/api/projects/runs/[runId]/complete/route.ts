@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { updateRunStatus, getProjectRun, rollupBatchRun } from '@/lib/project-manager'
 import { markJobDone, isQueueIdle } from '@/lib/run-queue'
 import { calcCostUsd } from '@/lib/n8n-sync'
-import { addCompanies, countCompanies } from '@/lib/companies-db'
+import { countCompanies, upsertRunCompanies } from '@/lib/companies-db'
 import { getErrorMessage } from '@/lib/error-message'
 import type { CompanyInput } from '@/lib/companies-db'
 
@@ -61,7 +61,16 @@ const ResultsSchema = z.object({
   portalDeadlineReached: z.boolean().optional(),
   hpNotFoundCount: z.number().int().min(0).optional(),
   hpNotFoundSaved: z.number().int().min(0).optional(),
-  warnings: z.array(z.string().max(1000)).max(100).optional(),
+  expectedCandidateCount: z.number().int().min(0).optional(),
+  processedCandidateCount: z.number().int().min(0).optional(),
+  pendingCandidateCount: z.number().int().min(0).optional(),
+  batchCount: z.number().int().min(0).optional(),
+  completedBatchCount: z.number().int().min(0).optional(),
+  failedBatchCount: z.number().int().min(0).optional(),
+  resultSetComplete: z.boolean().optional(),
+  // Diagnostic text is part of the execution record. Never reject the entire
+  // result set merely because an upstream stack trace exceeds a display limit.
+  warnings: z.array(z.string()).optional(),
 }).optional()
 
 // Strict company schema — reject malformed records before DB insert
@@ -132,8 +141,7 @@ export async function POST(
     const estimatedCostUsd = totalCost > 0 ? totalCost : undefined
 
     // Validate and filter company records
-    let actualAdded = 0
-    let actualUpgraded = 0
+    let actualSaved = 0
     if (body.companies?.length) {
       const validCompanies: CompanyInput[] = []
       for (const raw of body.companies) {
@@ -145,27 +153,54 @@ export async function POST(
         validCompanies.push(c as CompanyInput)
       }
       if (validCompanies.length > 0) {
-        const { added, upgraded } = await addCompanies(validCompanies)
-        actualAdded = added
-        actualUpgraded = upgraded
+        const { saved } = await upsertRunCompanies(validCompanies)
+        actualSaved = saved
       }
     }
 
-    // Use the actual Supabase row count for this runId as the authoritative itemsWritten.
-    // This reflects dedup-after state: companies that were flagged as duplicates of other runs
-    // still land in DB under this runId, so the count matches what the results page shows.
-    const dbRunCount = body.companies?.length ? await countCompanies({ runId }) : 0
+    // Results are persisted by each scrape batch, so the DB count is always the
+    // authority even though the final callback intentionally carries no company
+    // payload. A callback failure can no longer erase already collected rows.
+    const dbRunCount = await countCompanies({ runId })
     const itemsWritten = dbRunCount > 0 ? dbRunCount : (body.itemsWritten ?? body.results?.itemsWritten ?? 0)
 
-    await updateRunStatus(runId, body.status, undefined, itemsWritten, {
+    const expectedCandidateCount = body.results?.expectedCandidateCount
+      ?? body.results?.totalCompanies
+      ?? 0
+    const processedCandidateCount = body.results?.processedCandidateCount
+      ?? (
+        (body.results?.afterDedup ?? 0)
+        + (body.results?.relevanceHoldCount ?? 0)
+        + (body.results?.relevanceRejectedCount ?? 0)
+      )
+    const pendingCandidateCount = body.results?.pendingCandidateCount
+      ?? Math.max(0, expectedCandidateCount - processedCandidateCount)
+    const resultSetComplete = body.results?.resultSetComplete
+      ?? pendingCandidateCount === 0
+    const normalizedResults = body.results ? {
+      ...body.results,
+      itemsWritten,
+      expectedCandidateCount,
+      processedCandidateCount,
+      pendingCandidateCount,
+      resultSetComplete,
+    } : undefined
+
+    const incompleteResultSet = body.status === 'success' && !resultSetComplete
+    const finalStatus = incompleteResultSet ? 'error' : body.status
+    const finalError = incompleteResultSet
+      ? `結果の完全性を確認できませんでした: ${processedCandidateCount}/${expectedCandidateCount}件処理済み、未処理${pendingCandidateCount}件、失敗バッチ${body.results?.failedBatchCount ?? 0}件`
+      : body.error
+
+    await updateRunStatus(runId, finalStatus, undefined, itemsWritten, {
       tokensInput: body.tokensInput,
       tokensOutput: body.tokensOutput,
       estimatedCostUsd,
       rawSearchCount: body.results?.totalCompanies,
       completedAt: new Date().toISOString(),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      results: body.results as any,
-      error: body.status === 'error' ? (body.error ?? 'Unknown error') : undefined,
+      results: normalizedResults as any,
+      error: finalStatus === 'error' ? (finalError ?? 'Unknown error') : undefined,
     })
 
     // If this is a child run, roll up stats into the batch parent (idempotent once all done)
@@ -175,7 +210,7 @@ export async function POST(
     }
 
     // Trigger next queued job
-    const next = await markJobDone(runId, body.status === 'success' ? 'completed' : 'failed', body.error)
+    const next = await markJobDone(runId, finalStatus === 'success' ? 'completed' : 'failed', finalError)
     const base = process.env.INTERNAL_BASE_URL || 'http://localhost:3000'
     if (next) {
       fetch(`${base}/api/queue/start`, {
@@ -194,7 +229,7 @@ export async function POST(
       }).catch(() => {})
     }
 
-    return NextResponse.json({ success: true, itemsWritten, upgraded: actualUpgraded })
+    return NextResponse.json({ success: true, itemsWritten, saved: actualSaved, status: finalStatus })
   } catch (e) {
     return NextResponse.json({ success: false, error: getErrorMessage(e) }, { status: 400 })
   }

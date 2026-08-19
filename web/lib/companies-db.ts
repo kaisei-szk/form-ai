@@ -1,5 +1,6 @@
 import getSupabase from './db'
 import type { CompanyRow } from './types'
+import { createHash } from 'crypto'
 
 export interface Company {
   id: string
@@ -445,6 +446,66 @@ export async function addCompanies(rows: CompanyInput[]): Promise<{ added: numbe
   }
 
   return { added, duplicates, upgraded }
+}
+
+/**
+ * Persist the accepted official-site results for one run as soon as a scrape
+ * batch finishes. The primary key is derived from runId + normalized HP URL,
+ * so an n8n retry overwrites the same row instead of either dropping it as a
+ * global duplicate or creating a second copy.
+ *
+ * This intentionally differs from addCompanies(), whose global de-duplication
+ * is useful for manual imports. Search runs must keep their own complete result
+ * set even when the same company appeared in a previous run.
+ */
+export async function upsertRunCompanies(rows: CompanyInput[]): Promise<{ saved: number }> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSupabase() as any
+  const byId = new Map<string, Record<string, unknown>>()
+
+  for (const row of rows) {
+    const runId = row.runId?.trim() ?? ''
+    const normHp = normalizeUrl(row.hpUrl || '')
+    if (!runId || !normHp) continue
+
+    const id = `cmp-run-${createHash('sha256').update(`${runId}\u0000${normHp}`).digest('hex').slice(0, 32)}`
+    const normForm = normalizeUrl(row.formUrl || '')
+    const resolvedFormType = row.formUrl && isLineUrl(row.formUrl)
+      ? 'LINE'
+      : (row.formType === 'booking' ? 'reservation' : (row.formType || ''))
+
+    byId.set(id, {
+      id,
+      name:                 row.name || '',
+      hp_url:               row.hpUrl || '',
+      form_url:             row.formUrl || '',
+      normalized_form_url:  normForm,
+      normalized_hp_url:    normHp,
+      phone:                row.phone || '',
+      email:                row.email || '',
+      address:              row.address || '',
+      industry:             row.industry || '',
+      area:                 row.area || '',
+      form_type:            resolvedFormType,
+      status:               row.status || '未送信',
+      notes:                row.notes || '',
+      project_id:           row.projectId || '',
+      run_id:               runId,
+      collected_at:         row.collectedAt || new Date().toISOString(),
+      imported_from_sheets: row.importedFromSheets ?? false,
+    })
+  }
+
+  const records = [...byId.values()]
+  const CHUNK = 200
+  for (let i = 0; i < records.length; i += CHUNK) {
+    const { error } = await supabase
+      .from('companies')
+      .upsert(records.slice(i, i + CHUNK), { onConflict: 'id' })
+    if (error) throw error
+  }
+
+  return { saved: records.length }
 }
 
 export async function removeByRunId(runId: string): Promise<number> {
