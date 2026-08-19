@@ -49,6 +49,7 @@ test('another keyword does not cause premature saturation through global dedupli
       area: '渋谷区',
       maxPages: 4,
       includeOrganic: false,
+      requestDelayMs: 0,
       apiKey: 'test-key',
     })
     assert.deepEqual(result.items.map((item) => item.placeId), ['X', 'Z'])
@@ -74,6 +75,7 @@ test('industry synonym keywords widen places discovery', async () => {
       area: '渋谷区',
       maxPages: 1,
       includeOrganic: false,
+      requestDelayMs: 0,
       apiKey: 'test-key',
     })
     assert.ok(queries.some((q) => q.startsWith('美容室 ')))
@@ -99,11 +101,54 @@ test('one empty page is retried before a query is considered exhausted', async (
       area: '渋谷区',
       maxPages: 3,
       includeOrganic: false,
+      requestDelayMs: 0,
       apiKey: 'test-key',
     })
     assert.equal(result.items.length, 1)
     assert.equal(result.items[0].placeId, 'LATE')
   } finally {
     globalThis.fetch = originalFetch
+  }
+})
+
+test('organic pagination stops after two pages add no new company hosts', async () => {
+  const originalFetch = globalThis.fetch
+  const originalOrganicPages = process.env.SERPER_ORGANIC_MAX_PAGES
+  const originalOrganicLimit = process.env.SERPER_ORGANIC_QUERY_LIMIT
+  process.env.SERPER_ORGANIC_MAX_PAGES = '4'
+  process.env.SERPER_ORGANIC_QUERY_LIMIT = '1'
+
+  globalThis.fetch = async (input, init) => {
+    const body = JSON.parse(String(init?.body)) as { page: number }
+    if (String(input).includes('/places')) {
+      return new Response(JSON.stringify({ places: [] }), { status: 200 })
+    }
+    const host = body.page === 4 ? 'new.example.com' : 'same.example.com'
+    return new Response(JSON.stringify({
+      organic: [{
+        title: `株式会社候補 page ${body.page}`,
+        link: `https://${host}/page-${body.page}`,
+        snippet: '',
+      }],
+    }), { status: 200 })
+  }
+
+  try {
+    const result = await runSerperSearch({
+      keywords: ['対象業種'],
+      area: '渋谷区',
+      maxPages: 1,
+      requestDelayMs: 0,
+      apiKey: 'test-key',
+    })
+    assert.equal(result.stats.organicQueriesExecuted, 3)
+    assert.equal(result.stats.organicExhaustedQueryCount, 1)
+    assert.deepEqual(result.items.map((item) => item.link), ['https://same.example.com/page-1'])
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalOrganicPages === undefined) delete process.env.SERPER_ORGANIC_MAX_PAGES
+    else process.env.SERPER_ORGANIC_MAX_PAGES = originalOrganicPages
+    if (originalOrganicLimit === undefined) delete process.env.SERPER_ORGANIC_QUERY_LIMIT
+    else process.env.SERPER_ORGANIC_QUERY_LIMIT = originalOrganicLimit
   }
 })

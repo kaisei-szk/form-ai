@@ -253,6 +253,7 @@ export async function runSerperSearch(params: {
   maxResults?: number
   maxPages?: number
   includeOrganic?: boolean
+  requestDelayMs?: number
   apiKey: string
 }): Promise<{
   items: SerperResultItem[]
@@ -285,6 +286,8 @@ export async function runSerperSearch(params: {
   // the depth without changing code when a broad category has not saturated.
   const maxPages = params.maxPages ?? readBoundedInt(process.env.SERPER_MAX_PAGES, 50, 1, 50)
   const concurrency = readBoundedInt(process.env.SERPER_CONCURRENCY, 5, 1, 10)
+  const requestDelayMs = params.requestDelayMs
+    ?? readBoundedInt(process.env.REQUEST_DELAY_MS, 1_100, 0, 10_000)
   const seenPlaces = new Set<string>()
   const seenPlacesByKeyword = new Map<string, Set<string>>()
   const seenUrls = new Set<string>()
@@ -435,8 +438,8 @@ export async function runSerperSearch(params: {
         if (consecutiveEmpty >= 2) exhaustedQueries.add(keyword)
       }
 
-      if (items.length < resultLimit) {
-        await new Promise((resolve) => setTimeout(resolve, 1_100))
+      if (items.length < resultLimit && requestDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, requestDelayMs))
       }
     }
   }
@@ -497,7 +500,10 @@ export async function runSerperSearch(params: {
           const organic = response.organic ?? []
           stats.rawCandidateCount += organic.length
           stats.organicRawCandidateCount += organic.length
-          let newResultsOnPage = 0
+        // Saturation is based on new usable company hosts, not raw result URLs.
+        // Otherwise article pages and alternate URLs keep every query alive for
+        // all 20 pages even when they add no new official-site candidates.
+        let newCandidateHostsOnPage = 0
           const keywordSeen = organicSeenByKeyword.get(query.key) ?? new Set<string>()
           organicSeenByKeyword.set(query.key, keywordSeen)
 
@@ -512,8 +518,6 @@ export async function runSerperSearch(params: {
               continue
             }
             keywordSeen.add(normalizedUrl)
-            newResultsOnPage++
-
             const host = extractHost(normalizedUrl)
             const blockedHost = !host || isNonProductionHost(host) || SKIP_DOMAINS.has(host)
               || [...SKIP_DOMAINS].some((domain) => host.endsWith(`.${domain}`))
@@ -532,6 +536,7 @@ export async function runSerperSearch(params: {
 
             seenUrls.add(normalizedUrl)
             seenOrganicHosts.add(host)
+            newCandidateHostsOnPage++
             items.push({
               link: result.link ?? normalizedUrl,
               title: result.title ?? '',
@@ -547,15 +552,15 @@ export async function runSerperSearch(params: {
             if (items.length >= resultLimit) break
           }
 
-          const consecutiveEmpty = newResultsOnPage === 0
+          const consecutiveEmpty = newCandidateHostsOnPage === 0
             ? (organicZeroNewPages.get(query.key) ?? 0) + 1
             : 0
           organicZeroNewPages.set(query.key, consecutiveEmpty)
           if (consecutiveEmpty >= 2) organicExhausted.add(query.key)
         }
 
-        if (items.length < resultLimit) {
-          await new Promise((resolve) => setTimeout(resolve, 1_100))
+        if (items.length < resultLimit && requestDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, requestDelayMs))
         }
       }
     }
