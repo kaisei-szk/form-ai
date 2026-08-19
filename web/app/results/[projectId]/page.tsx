@@ -410,6 +410,7 @@ export default function ProjectResultsPage() {
     : undefined
   const expectedCandidateCount = progressRun?.results?.expectedCandidateCount
     ?? progressRun?.rawSearchCount
+    ?? undefined
   const processedCandidateCount = progressRun?.results?.processedCandidateCount
   const pendingCandidateCount = progressRun?.results?.pendingCandidateCount
     ?? (expectedCandidateCount !== undefined && processedCandidateCount !== undefined
@@ -723,10 +724,10 @@ export default function ProjectResultsPage() {
                     [{(run as ProjectRun & { childRunIds?: string[] }).childRunIds!.length}都道府県]
                   </span>
                 )}
-                {run.itemsWritten !== undefined && (
+                {run.itemsWritten != null && (
                   <span className="text-xs opacity-70">({run.itemsWritten}件)</span>
                 )}
-                {run.estimatedCostUsd !== undefined && run.estimatedCostUsd > 0 && (
+                {run.estimatedCostUsd != null && run.estimatedCostUsd > 0 && (
                   <span className="text-xs opacity-50">
                     {run.estimatedCostUsd < 0.1
                       ? `${(run.estimatedCostUsd * 100).toFixed(1)}¢`
@@ -1454,7 +1455,7 @@ function ProgressMetric({
   tone,
 }: {
   label: string
-  value: number | undefined
+  value: number | null | undefined
   tone?: 'green' | 'amber'
 }) {
   const color = tone === 'green'
@@ -1466,7 +1467,7 @@ function ProgressMetric({
     <div className="rounded border border-gray-100 bg-gray-50 px-3 py-2">
       <div className="text-[11px] text-gray-500">{label}</div>
       <div className={`text-base font-semibold tabular-nums ${color}`}>
-        {value === undefined ? '—' : value.toLocaleString()}
+        {typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : '—'}
       </div>
     </div>
   )
