@@ -1,10 +1,22 @@
+import { expandIndustryTerms } from './industry-synonyms.ts'
+
 export type SerperResultItem = {
   link: string
   title: string
   snippet: string
   keyword: string
   area: string
-  source: 'places' | 'organic'
+  source: 'places' | 'organic' | 'portal'
+  address: string
+  phone: string
+  category: string
+  placeId: string
+}
+
+// Placesに掲載があるが公式サイトURLを持たない事業者。ポータル発見の
+// 再検索パイプラインで公式HPを探し、見つからなければ「公式HP未発見」枠へ。
+export type NoWebsitePlace = {
+  name: string
   address: string
   phone: string
   category: string
@@ -40,8 +52,9 @@ export interface SerperSearchStats {
   normalizedArea: string
 }
 
-// ポータル・SNS・アグリゲータドメイン — serper結果から事前除外
-const SKIP_DOMAINS = new Set([
+// ポータル・SNS・アグリゲータドメイン — 公式HP候補からは除外する。
+// ただしポータルは portal-discovery で「候補発見元」として別途活用する。
+export const SKIP_DOMAINS = new Set([
   'jalan.net','tabelog.com','hotpepper.jp','ekiten.jp','townpage.ntt.co.jp',
   'navitime.co.jp','navitime.jp','mapion.co.jp','its-mo.com',
   'yelp.com','yelp.co.jp','retty.me','gurunavi.com','gnavi.co.jp',
@@ -68,16 +81,16 @@ const SKIP_DOMAINS = new Set([
   'value-press.com','careerticket.jp','in-fra.jp','rocketreach.co','houjin.jp',
 ])
 
-function extractHost(url: string): string {
+export function extractHost(url: string): string {
   const m = url.match(/^https?:\/\/([^/?#]+)/)
   return m ? m[1].replace(/^www\./, '').toLowerCase() : ''
 }
 
-function isNonProductionHost(host: string): boolean {
+export function isNonProductionHost(host: string): boolean {
   return /^(?:test\d*|stg|staging|dev|demo|preview)$/u.test(host.split('.')[0] ?? '')
 }
 
-function normalizeCandidateUrl(url: string): string {
+export function normalizeCandidateUrl(url: string): string {
   try {
     const parsed = new URL(url)
     parsed.hash = ''
@@ -187,7 +200,7 @@ async function fetchPlacesPage(
   return { error: lastError ?? { status: 500, text: 'Unknown Serper error' } }
 }
 
-async function fetchOrganicPage(
+export async function fetchOrganicPage(
   query: string,
   page: number,
   apiKey: string,
@@ -234,22 +247,30 @@ export async function runSerperSearch(params: {
   apiKey: string
 }): Promise<{
   items: SerperResultItem[]
+  noWebsitePlaces: NoWebsitePlace[]
   stats: SerperSearchStats
   error?: { status: number; text: string }
   errors: Array<{ status: number; text: string }>
 }> {
   const startedAt = Date.now()
-  const timeBudgetMs = readBoundedInt(process.env.SERPER_TIME_BUDGET_MS, 240_000, 60_000, 280_000)
+  // Vercel等の300秒制限下ではデフォルト240秒。ローカル/セルフホストでは
+  // SERPER_TIME_BUDGET_MS で最長30分まで拡大できる。
+  const timeBudgetMs = readBoundedInt(process.env.SERPER_TIME_BUDGET_MS, 240_000, 60_000, 1_800_000)
   const deadline = startedAt + timeBudgetMs
   let searchTimeBudgetReached = false
   // Leave enough room for one worst-case 30-second Serper request batch and
   // response serialization before the platform's 300-second hard timeout.
   const hasTimeForBatch = () => Date.now() < deadline - 35_000
   const normalizedArea = normalizeAreaName(params.area)
-  const keywords = [...new Set(params.keywords
+  const inputKeywords = [...new Set(params.keywords
     .map((keyword) => keyword.normalize('NFKC').trim())
     .filter((keyword) => keyword && !/\b(?:AND|OR)\b|[|()]/iu.test(keyword))
-  )].slice(0, 30)
+  )]
+  // 業種同義語（美容室↔美容院など）を検索語にも展開して候補母数を広げる。
+  // 入力キーワードを先頭に保ち、同義語は後ろへ追加する。
+  const synonymKeywords = expandIndustryTerms(inputKeywords)
+    .filter((keyword) => !inputKeywords.includes(keyword))
+  const keywords = [...inputKeywords, ...synonymKeywords].slice(0, 30)
   const resultLimit = params.maxResults && params.maxResults > 0 ? params.maxResults : Number.POSITIVE_INFINITY
   // A finite cap protects API credits, while still allowing operators to raise
   // the depth without changing code when a broad category has not saturated.
@@ -261,6 +282,7 @@ export async function runSerperSearch(params: {
   const exhaustedQueries = new Set<string>()
   const zeroNewPages = new Map<string, number>()
   const items: SerperResultItem[] = []
+  const noWebsitePlaces: NoWebsitePlace[] = []
   const errors: Array<{ status: number; text: string }> = []
 
   const stats: SerperSearchStats = {
@@ -352,6 +374,15 @@ export async function runSerperSearch(params: {
           const link = place.website?.trim() ?? ''
           if (!link) {
             stats.noWebsiteCount++
+            if ((place.title ?? '').trim() && isAddressInRequestedArea(place.address ?? '', normalizedArea)) {
+              noWebsitePlaces.push({
+                name: (place.title ?? '').trim(),
+                address: place.address ?? '',
+                phone: place.phoneNumber ?? '',
+                category: [...new Set([place.type, place.category, ...(place.types ?? [])].filter(Boolean))].join(' / '),
+                placeId: place.placeId ?? place.cid ?? placeKey,
+              })
+            }
             continue
           }
           if (!isAddressInRequestedArea(place.address ?? '', normalizedArea)) {
@@ -530,5 +561,5 @@ export async function runSerperSearch(params: {
   stats.organicCandidateCount = Math.max(0, items.length - stats.placesCandidateCount)
   stats.searchTimeBudgetReached = searchTimeBudgetReached
   stats.searchElapsedMs = Date.now() - startedAt
-  return { items, stats, errors: errors.slice(0, 100), ...(error && { error }) }
+  return { items, noWebsitePlaces, stats, errors: errors.slice(0, 100), ...(error && { error }) }
 }

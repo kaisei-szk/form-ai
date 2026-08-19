@@ -52,6 +52,33 @@ test('another keyword does not cause premature saturation through global dedupli
   }
 })
 
+test('industry synonym keywords widen places discovery', async () => {
+  const originalFetch = globalThis.fetch
+  const queries: string[] = []
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { q: string }
+    queries.push(body.q)
+    const places = body.q.startsWith('美容院 ') ? [place('SYN')] : []
+    return new Response(JSON.stringify({ places }), { status: 200 })
+  }
+
+  try {
+    const result = await runSerperSearch({
+      keywords: ['美容室'],
+      area: '渋谷区',
+      maxPages: 1,
+      includeOrganic: false,
+      apiKey: 'test-key',
+    })
+    assert.ok(queries.some((q) => q.startsWith('美容室 ')))
+    assert.ok(queries.some((q) => q.startsWith('美容院 ')))
+    assert.equal(result.items.length, 1)
+    assert.equal(result.items[0].keyword, '美容院')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('one empty page is retried before a query is considered exhausted', async () => {
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (_input, init) => {

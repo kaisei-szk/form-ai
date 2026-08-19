@@ -208,7 +208,7 @@ const CandidateSchema = z.object({
   keywords: z.array(z.string()).default([]),
   area: z.string().default(''),
   searchArea: z.string().optional(),
-  source: z.enum(['places', 'organic']).optional(),
+  source: z.enum(['places', 'organic', 'portal']).optional(),
   sourceTitle: z.string().optional(),
   sourceSnippet: z.string().optional(),
   sourceAddress: z.string().optional(),
@@ -1528,16 +1528,19 @@ async function processItem(
     sourceSnippet: candidate.sourceSnippet,
     sourceAddress: candidate.sourceAddress,
     sourceCategory: candidate.sourceCategory,
+    sourcePhone: candidate.sourcePhone,
     extractedAddress: extracted.address,
+    extractedPhone: extracted.phone,
     homepageTitle,
     homepageText,
     ...structuredPage,
   })
-  if (preliminaryRelevance.status === 'rejected' && preliminaryRelevance.reasons.some((reason) =>
+  if (preliminaryRelevance.status !== 'accepted' && preliminaryRelevance.reasons.some((reason) =>
     reason === 'missing_area_evidence'
     || reason === 'area_mismatch'
     || reason === 'missing_industry_evidence'
     || reason === 'unverified_official_site'
+    || reason === 'insufficient_evidence'
   )) {
     const evidence = await collectRelevanceEvidence(hpFetch.html, effectiveBase, timeoutMs)
     if (evidence.text) homepageText = `${homepageText} ${evidence.text}`.slice(0, 150_000)
@@ -2053,7 +2056,9 @@ export async function POST(req: NextRequest) {
         sourceSnippet: candidate.sourceSnippet,
         sourceAddress: candidate.sourceAddress,
         sourceCategory: candidate.sourceCategory,
+        sourcePhone: candidate.sourcePhone,
         extractedAddress: result.address,
+        extractedPhone: result.phone,
         homepageTitle: result.homepageTitle,
         homepageText: result.homepageText,
         hasBusinessSchema: result.hasBusinessSchema,
@@ -2155,7 +2160,8 @@ export async function POST(req: NextRequest) {
         searchedCandidateCount: items.length,
         fetchedCount: rawResults.filter((r) => r.error === null).length,
         relevanceAcceptedCount: responseResults.length,
-        relevanceRejectedCount: items.length - responseResults.length,
+        relevanceHoldCount: evaluatedResults.filter((r) => r.relevance.status === 'hold').length,
+        relevanceRejectedCount: evaluatedResults.filter((r) => r.relevance.status === 'rejected').length,
         relevanceReasonCounts,
         fetchErrorSamples: rawResults
           .filter((result) => result.error)
@@ -2163,6 +2169,17 @@ export async function POST(req: NextRequest) {
           .map((result) => ({ url: result.url, error: result.error })),
         rejectionSamples: evaluatedResults
           .flatMap((result, index) => result.relevance.status === 'rejected'
+            ? [{ result, candidate: items[index] }]
+            : [])
+          .slice(0, 50)
+          .map(({ result, candidate }) => ({
+            url: result.url,
+            source: candidate.source,
+            title: candidate.sourceTitle,
+            reasons: result.relevance.reasons,
+          })),
+        holdSamples: evaluatedResults
+          .flatMap((result, index) => result.relevance.status === 'hold'
             ? [{ result, candidate: items[index] }]
             : [])
           .slice(0, 50)

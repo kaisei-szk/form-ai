@@ -1,4 +1,6 @@
-export type CandidateSource = 'places' | 'organic'
+import { expandIndustryTerms } from './industry-synonyms.ts'
+
+export type CandidateSource = 'places' | 'organic' | 'portal'
 
 export interface CandidateRelevanceInput {
   url: string
@@ -11,7 +13,9 @@ export interface CandidateRelevanceInput {
   sourceSnippet?: string
   sourceAddress?: string
   sourceCategory?: string
+  sourcePhone?: string
   extractedAddress?: string | null
+  extractedPhone?: string | null
   homepageTitle?: string | null
   homepageText?: string | null
   hasBusinessSchema?: boolean
@@ -26,13 +30,18 @@ export type CandidateRejectionReason =
   | 'area_mismatch'
   | 'missing_industry_evidence'
   | 'negative_industry_evidence'
+  | 'insufficient_evidence'
+
+export type CandidateRelevanceStatus = 'accepted' | 'hold' | 'rejected'
 
 export interface CandidateRelevanceDecision {
-  status: 'accepted' | 'rejected'
+  status: CandidateRelevanceStatus
   reasons: CandidateRejectionReason[]
   areaMatched: boolean
   industryMatched: boolean
   officialSite: boolean
+  score: number
+  evidence: string[]
 }
 
 const PREFECTURE_SUFFIX_RE = /[都道府県]$/u
@@ -234,16 +243,61 @@ function isKnownNonOfficialUrl(rawUrl: string): boolean {
   }
 }
 
+function extractCoreName(title: string): string {
+  const firstSegment = title.split(/[|｜/／«»—–【】\[\]]/u)[0] ?? title
+  return normalizeEvidence(
+    firstSegment.replace(/(?:株式会社|有限会社|合同会社|合資会社|一般社団法人|一般財団法人|\(株\)|㈱|\(有\)|㈲)/gu, ''),
+  )
+}
+
+function namesMatch(sourceTitle: string | undefined, homepageTitle: string | null | undefined): boolean {
+  if (!sourceTitle || !homepageTitle) return false
+  const core = extractCoreName(sourceTitle)
+  return core.length >= 2 && normalizeEvidence(homepageTitle).includes(core)
+}
+
+function phonesMatch(a: string | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false
+  const digitsA = a.normalize('NFKC').replace(/\D/g, '')
+  const digitsB = b.normalize('NFKC').replace(/\D/g, '')
+  if (digitsA.length < 9 || digitsB.length < 9) return false
+  // 国番号 +81 表記の差を吸収するため末尾9桁で比較する
+  return digitsA.slice(-9) === digitsB.slice(-9)
+}
+
 /**
- * Precision-first admission gate. A candidate is accepted only when all of
- * the following are evidenced: official site, requested area, requested
- * industry. Search ranking by itself is never treated as proof.
+ * ページ本文中の地区名が「所在地」を示す文脈かを判定する。
+ * 「渋谷区対応」「渋谷区のおすすめ」のような対応エリア・紹介記事表現は
+ * 所在地の証拠として扱わない（精度目標.md 地区判定）。
+ */
+function pageMentionsAreaAsLocation(text: string, rawArea: string): boolean {
+  const needle = areaNeedle(rawArea)
+  if (!needle || !text.trim()) return false
+  const haystack = normalizeEvidence(text)
+  let from = 0
+  while (from < haystack.length) {
+    const index = haystack.indexOf(needle, from)
+    if (index < 0) return false
+    const after = haystack.slice(index + needle.length, index + needle.length + 12)
+    const serviceAreaClaim = /^(?:対応|対象|全域|近郊|周辺|エリア|への出張|に出張|のおすすめ|おすすめ|ランキング|人気)/u.test(after)
+    if (!serviceAreaClaim) return true
+    from = index + needle.length
+  }
+  return false
+}
+
+/**
+ * 事業者候補の採用判定（精度目標.md 準拠）。
+ *
+ * - 採用証拠は加点方式: 住所一致・カテゴリ/タイトル/自己申告の業種整合・
+ *   名称一致・電話一致などの組み合わせで採用する。
+ * - 明確な矛盾のみ除外方式: 地区外住所しかない・業種の自己否定・
+ *   ポータル/記事ページ・予約サービスへのリダイレクトなど。
+ * - 情報不足だけでは除外せず 'hold'（保留・追加確認）として返す。
  */
 export function evaluateCandidateRelevance(
   input: CandidateRelevanceInput,
 ): CandidateRelevanceDecision {
-  const reasons: CandidateRejectionReason[] = []
-
   let validUrl = false
   try {
     const parsed = new URL(input.url)
@@ -251,69 +305,111 @@ export function evaluateCandidateRelevance(
   } catch {
     validUrl = false
   }
-  if (!validUrl) reasons.push('invalid_url')
-
-  const strictArea = input.searchArea || input.area
-  const authoritativeAddress = input.sourceAddress?.trim() || input.extractedAddress?.trim() || ''
-  let areaMatched = false
-  if (authoritativeAddress) {
-    areaMatched = isAddressInArea(authoritativeAddress, strictArea)
-    if (!areaMatched) reasons.push('area_mismatch')
-  } else {
-    const pageAreaEvidence = [input.homepageTitle, input.homepageText]
-      .filter(Boolean)
-      .join(' ')
-    areaMatched = isAddressInArea(pageAreaEvidence, strictArea)
-    if (!areaMatched) reasons.push('missing_area_evidence')
+  if (!validUrl) {
+    return {
+      status: 'rejected',
+      reasons: ['invalid_url'],
+      areaMatched: false,
+      industryMatched: false,
+      officialSite: false,
+      score: 0,
+      evidence: [],
+    }
   }
 
+  const strictArea = input.searchArea || input.area
+  const listedSource = input.source === 'places' || input.source === 'portal'
+  const reasons: CandidateRejectionReason[] = []
+  const evidence: string[] = []
+
+  // ── 公式サイト性の明確な矛盾 ──────────────────────────
+  const officialContradiction = isKnownNonOfficialUrl(input.url)
+    || Boolean(input.redirectedToNonOfficial)
+    || Boolean(input.hasDirectorySchema)
+    || isLikelyNonOfficialContentPage(input.url)
+
+  // ── 地区の証拠 ───────────────────────────────────────
+  const sourceAddress = input.sourceAddress?.trim() ?? ''
+  const extractedAddress = input.extractedAddress?.trim() ?? ''
+  const sourceAddressInArea = Boolean(sourceAddress) && isAddressInArea(sourceAddress, strictArea)
+  const extractedAddressInArea = Boolean(extractedAddress) && isAddressInArea(extractedAddress, strictArea)
+  // 本社が地区外でも、掲載元（支店）住所が地区内なら対象（精度目標.md 地区判定）
+  const addressInArea = sourceAddressInArea || extractedAddressInArea
+  const hasAnyAddress = Boolean(sourceAddress || extractedAddress)
+  const areaContradiction = hasAnyAddress && !addressInArea
+  const pageAreaText = [input.homepageTitle, input.homepageText].filter(Boolean).join(' ')
+  const weakAreaMention = !hasAnyAddress && pageMentionsAreaAsLocation(pageAreaText, strictArea)
+  const areaMatched = addressInArea || weakAreaMention
+  if (sourceAddressInArea) evidence.push('source_address_in_area')
+  if (extractedAddressInArea) evidence.push('extracted_address_in_area')
+  if (weakAreaMention) evidence.push('area_text_mention')
+
+  // ── 業種の証拠（同義語・カテゴリ整合を含む加点材料） ──
   const rawTerms = [...new Set([input.industry, ...input.keywords].map((term) => term.trim()).filter(Boolean))]
-  const terms = [...new Set(rawTerms.flatMap((term) => {
+  const stemmedTerms = [...new Set(rawTerms.flatMap((term) => {
     const stem = term.replace(/(?:専門店|会社|事業者|業者|事務所|サービス|事業)$/u, '')
     return stem.length >= 2 && stem !== term ? [term, stem] : [term]
   }))]
+  const terms = expandIndustryTerms(stemmedTerms)
   const listingIndustryEvidence = [input.sourceTitle, input.sourceCategory]
     .filter(Boolean)
     .join(' ')
-  const titleIndustryMatched = containsIndustryEvidence(input.homepageTitle ?? '', terms)
-  const negativeIndustryMatched = containsNegativeIndustryEvidence(input.homepageText ?? '', terms)
-  const qualifiedBodyIndustryMatched = !input.hasDirectorySchema
+  const listingMatch = containsIndustryEvidence(listingIndustryEvidence, terms)
+  const titleMatch = containsIndustryEvidence(input.homepageTitle ?? '', terms)
+  const selfDeclared = !input.hasDirectorySchema
     && isLikelyOfficialCorporatePage(input.url)
     && containsSelfDeclaredIndustryEvidence(input.homepageText ?? '', terms)
-  // Search snippets can quote unrelated articles and are never proof of the
-  // company's own business. Places may additionally rely on its registered
-  // name/category; both sources may rely on a qualified official page.
-  const positiveIndustryMatched = input.source === 'organic'
-    ? (!isLikelyNonOfficialContentPage(input.url) && titleIndustryMatched)
-      || qualifiedBodyIndustryMatched
-    : containsIndustryEvidence(listingIndustryEvidence, terms)
-      || titleIndustryMatched
-      || qualifiedBodyIndustryMatched
-  const industryMatched = positiveIndustryMatched && !negativeIndustryMatched
-  if (!industryMatched) reasons.push('missing_industry_evidence')
-  if (negativeIndustryMatched) reasons.push('negative_industry_evidence')
+  const bodyMention = containsIndustryEvidence(input.homepageText ?? '', terms)
+  const negativeIndustry = containsNegativeIndustryEvidence(input.homepageText ?? '', terms)
+  const industryLevel = (selfDeclared || listingMatch) ? 3 : titleMatch ? 2 : bodyMention ? 1 : 0
+  const industryMatched = industryLevel >= 2 && !negativeIndustry
+  if (listingMatch) evidence.push('listing_category_match')
+  if (titleMatch) evidence.push('homepage_title_match')
+  if (selfDeclared) evidence.push('self_declared_industry')
+  if (!selfDeclared && !listingMatch && !titleMatch && bodyMention) evidence.push('body_industry_mention')
 
-  // Places registers the website against a business listing. Organic results
-  // are admitted only with independent on-site proof: an extracted address in
-  // the exact requested area and matching industry content. This prevents a
-  // search article or directory snippet from being treated as an official HP.
-  const organicOfficialSite = input.source === 'organic'
-    && Boolean(input.extractedAddress?.trim())
-    && isAddressInArea(input.extractedAddress ?? '', strictArea)
-    && industryMatched
-  const officialSite = validUrl
-    && !isKnownNonOfficialUrl(input.url)
-    && !input.redirectedToNonOfficial
-    && !input.hasDirectorySchema
-    && !isLikelyNonOfficialContentPage(input.url)
-    && (input.source === 'places' || organicOfficialSite)
-  if (!officialSite && validUrl) reasons.push('unverified_official_site')
+  // ── 同一性の証拠 ─────────────────────────────────────
+  const nameMatch = listedSource && namesMatch(input.sourceTitle, input.homepageTitle)
+  const phoneMatch = phonesMatch(input.sourcePhone, input.extractedPhone)
+  if (nameMatch) evidence.push('name_match')
+  if (phoneMatch) evidence.push('phone_match')
+  if (input.hasBusinessSchema) evidence.push('business_schema')
+  if (listedSource) evidence.push('listed_source')
 
-  return {
-    status: reasons.length === 0 ? 'accepted' : 'rejected',
-    reasons,
-    areaMatched,
-    industryMatched,
-    officialSite,
+  const score = (addressInArea ? 3 : weakAreaMention ? 1 : 0)
+    + industryLevel
+    + (nameMatch ? 2 : 0)
+    + (phoneMatch ? 3 : 0)
+    + (input.hasBusinessSchema ? 1 : 0)
+    + (listedSource ? 2 : 0)
+
+  // organic は検索順位だけを公式の証拠にしない。サイト内住所と業種整合の
+  // 両方が揃ったときのみ独立に公式と裏づけられたとみなす。
+  const organicCorroborated = addressInArea && industryMatched
+  const officialSite = !officialContradiction && (listedSource || organicCorroborated)
+
+  // ── 明確な矛盾 → 除外 ────────────────────────────────
+  if (officialContradiction) reasons.push('unverified_official_site')
+  if (areaContradiction) reasons.push('area_mismatch')
+  if (negativeIndustry) reasons.push('negative_industry_evidence')
+  if (reasons.length > 0) {
+    return { status: 'rejected', reasons, areaMatched, industryMatched, officialSite, score, evidence }
   }
+
+  // ── 採用可能な組み合わせ（加点方式） ──────────────────
+  const accepted =
+    (listedSource && addressInArea && industryMatched)
+    || (listedSource && addressInArea && nameMatch && industryLevel >= 1)
+    || (listedSource && addressInArea && phoneMatch)
+    || (!listedSource && organicCorroborated)
+  if (accepted) {
+    return { status: 'accepted', reasons: [], areaMatched, industryMatched, officialSite, score, evidence }
+  }
+
+  // ── 情報不足 → 保留（追加確認へ） ────────────────────
+  if (!areaMatched) reasons.push('missing_area_evidence')
+  if (!industryMatched) reasons.push('missing_industry_evidence')
+  if (!listedSource && !organicCorroborated) reasons.push('unverified_official_site')
+  if (reasons.length === 0) reasons.push('insufficient_evidence')
+  return { status: 'hold', reasons, areaMatched, industryMatched, officialSite, score, evidence }
 }

@@ -162,7 +162,72 @@ test('related-company text is not the candidate own industry declaration', () =>
     extractedAddress: '東京都千代田区丸の内1-1-1',
     hasBusinessSchema: true,
   })
-  assert.equal(result.status, 'rejected')
+  // 矛盾ではなく情報不足なので、除外ではなく保留になる
+  assert.equal(result.status, 'hold')
+  assert.ok(result.reasons.includes('missing_industry_evidence'))
+})
+
+test('industry synonyms bridge the keyword and the listing category', () => {
+  const result = evaluateCandidateRelevance({
+    url: 'https://salon-x.example.jp/',
+    industry: '美容室',
+    keywords: ['美容室'],
+    area: '渋谷区',
+    source: 'places',
+    sourceTitle: 'HAIR SALON X 渋谷',
+    sourceCategory: '美容院',
+    sourceAddress: '東京都渋谷区神南1-1-1',
+    homepageTitle: null,
+    homepageText: null,
+  })
+  assert.equal(result.status, 'accepted')
+  assert.ok(result.evidence.includes('listing_category_match'))
+})
+
+test('a verified listing without industry text is held, not rejected', () => {
+  const result = evaluateCandidateRelevance({
+    url: 'https://salon-y.example.jp/',
+    industry: '美容室',
+    keywords: ['美容室'],
+    area: '渋谷区',
+    source: 'places',
+    sourceTitle: 'サロンY',
+    sourceCategory: '',
+    sourceAddress: '東京都渋谷区宇田川町1-1',
+  })
+  assert.equal(result.status, 'hold')
+  assert.ok(result.reasons.includes('missing_industry_evidence'))
+})
+
+test('listing phone matching the site phone accepts the candidate', () => {
+  const result = evaluateCandidateRelevance({
+    url: 'https://salon-z.example.jp/',
+    industry: '美容室',
+    keywords: ['美容室'],
+    area: '渋谷区',
+    source: 'places',
+    sourceTitle: 'サロンZ',
+    sourceAddress: '東京都渋谷区宇田川町2-2',
+    sourcePhone: '03-1234-5678',
+    extractedPhone: '0312345678',
+    homepageTitle: 'サロンZ',
+  })
+  assert.equal(result.status, 'accepted')
+  assert.ok(result.evidence.includes('phone_match'))
+})
+
+test('service-area claims alone are not treated as a location', () => {
+  const result = evaluateCandidateRelevance({
+    url: 'https://example.jp/',
+    industry: '人材紹介会社',
+    keywords: ['人材紹介会社'],
+    area: '渋谷区',
+    source: 'organic',
+    homepageTitle: '株式会社サンプル',
+    homepageText: '渋谷区対応の人材紹介サービスです。当社は人材紹介事業を行っています。',
+  })
+  assert.notEqual(result.status, 'accepted')
+  assert.ok(result.reasons.includes('missing_area_evidence'))
 })
 
 test('test and staging subdomains are never official output', () => {
