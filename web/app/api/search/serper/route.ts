@@ -3,7 +3,6 @@ import { z } from 'zod'
 import { runSerperSearch, extractHost } from '@/lib/serper'
 import { runPortalDiscovery, businessDedupeKey, type PortalDiscoveryStats } from '@/lib/portal-discovery'
 import { validateAreaInput } from '@/lib/search-relevance'
-import { addCompanies } from '@/lib/companies-db'
 
 export const maxDuration = 300
 
@@ -62,11 +61,11 @@ export async function POST(req: NextRequest) {
 
     // ── ポータル発見（候補母数の拡大） ─────────────────────
     // ポータル・名簿の掲載事業者を抽出し、公式リンク確認とSerper再検索で
-    // 公式HP候補を追加する。公式HPが見つからない事業者は「公式HP未発見」
-    // として別枠でDBに保存する（精度目標.md ポータルの扱い）。
+    // 公式HP候補を追加する。公式HPが見つからない事業者は統計上の
+    // 「公式HP未発見」として数えるが、通常の企業結果には保存しない。
     let portalStats: PortalDiscoveryStats | undefined
     let hpNotFoundCount = 0
-    let hpNotFoundSaved = 0
+    const hpNotFoundSaved = 0
     const portalDeadline = Math.max(deadline, Date.now() + portalBudgetMs)
     if (body.includePortals && Date.now() < portalDeadline - 15_000) {
       const existingKeys = new Set(items.map((item) => businessDedupeKey(item.title, item.phone, item.address)))
@@ -95,26 +94,10 @@ export async function POST(req: NextRequest) {
       portalStats = portal.stats
       hpNotFoundCount = portal.hpNotFound.length
 
-      if (portal.hpNotFound.length > 0 && (body.runId || body.projectId)) {
-        try {
-          const { added } = await addCompanies(portal.hpNotFound.map((business) => ({
-            name: business.name,
-            hpUrl: business.portalUrl,
-            formUrl: '',
-            phone: business.phone,
-            address: business.address,
-            industry: body.industry || body.keywords[0] || '',
-            area: areaValidation.normalized,
-            status: '公式HP未発見',
-            notes: `発見元: ${business.portalHost}`,
-            projectId: body.projectId,
-            runId: body.runId,
-          })))
-          hpNotFoundSaved = added
-        } catch {
-          // 未発見枠の保存失敗で検索全体を失敗させない
-        }
-      }
+      // 未解決候補は件数として返すだけで companies には保存しない。
+      // portalUrl / Google Maps URL を HP URL として保存すると、結果画面や
+      // CSVにまとめサイトそのものが混入するため。公式HPへ解決できた候補
+      // だけが items に入り、後段の関連性検証・保存へ進む。
     }
 
     stats.candidateCount = items.length

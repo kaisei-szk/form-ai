@@ -209,10 +209,14 @@ function isLikelyOfficialCorporatePage(rawUrl: string): boolean {
 function isLikelyNonOfficialContentPage(rawUrl: string): boolean {
   try {
     const path = decodeURIComponent(new URL(rawUrl).pathname).toLowerCase()
-    return /\/(?:press(?:release)?|news|articles?|columns?|blogs?|jobs?|careers?|professional|companies|item)(?:\/|$)/u.test(path)
+    return /\/(?:press(?:release)?|news|posts?|articles?|columns?|blogs?|jobs?|careers?|professional|companies|item)(?:\/|$)/u.test(path)
   } catch {
     return true
   }
+}
+
+function isLikelyListingPageTitle(title: string): boolean {
+  return /(?:一覧|ランキング|比較|まとめ|厳選|\d+\s*(?:社|店|選|件))/iu.test(title)
 }
 
 const NON_OFFICIAL_HOSTS = new Set([
@@ -230,6 +234,8 @@ const NON_OFFICIAL_HOSTS = new Set([
   'maa-a.or.jp', 'ma-shoukei.com', 'tranbi.com', 'ma-japan.info',
   'biz-maps.com', 'careercross.com',
   'value-press.com', 'careerticket.jp', 'in-fra.jp', 'rocketreach.co', 'houjin.jp',
+  'web-kanji.com', 'boxil.jp', 'comparison.biz', 'biz.ne.jp',
+  'creators-station.jp', 'it-trend.jp', 'solution-store.honichi.com', 'hokihosting.com',
 ])
 
 function isKnownNonOfficialUrl(rawUrl: string): boolean {
@@ -327,6 +333,7 @@ export function evaluateCandidateRelevance(
     || Boolean(input.redirectedToNonOfficial)
     || Boolean(input.hasDirectorySchema)
     || isLikelyNonOfficialContentPage(input.url)
+    || (input.source === 'organic' && isLikelyListingPageTitle(input.homepageTitle || input.sourceTitle || ''))
 
   // ── 地区の証拠 ───────────────────────────────────────
   const sourceAddress = input.sourceAddress?.trim() ?? ''

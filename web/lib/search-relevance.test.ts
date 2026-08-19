@@ -39,6 +39,62 @@ test('known directory cannot be admitted as an official organic site', () => {
   assert.ok(result.reasons.includes('unverified_official_site'))
 })
 
+test('comparison and listing media never become final official HPs', () => {
+  for (const url of [
+    'https://web-kanji.com/posts/sns-tokyo',
+    'https://it-trend.jp/sns_operation_service/21926',
+    'https://solution-store.honichi.com/solutions/example/',
+    'https://hokihosting.com/it/115096/',
+  ]) {
+    const result = evaluateCandidateRelevance({
+      ...organicBase,
+      url,
+      industry: 'SNS運用代行会社',
+      keywords: ['SNS運用代行会社'],
+      area: '渋谷区',
+      searchArea: '渋谷区',
+      homepageTitle: 'SNS運用代行会社',
+      homepageText: '所在地 東京都渋谷区道玄坂1-1-1 SNS運用代行サービスを提供します。',
+      extractedAddress: '東京都渋谷区道玄坂1-1-1',
+    })
+    assert.equal(result.status, 'rejected', url)
+    assert.ok(result.reasons.includes('unverified_official_site'), url)
+  }
+})
+
+test('a posts article URL is not emitted as an official HP even on an unknown host', () => {
+  const result = evaluateCandidateRelevance({
+    ...organicBase,
+    url: 'https://unknown-media.example.jp/posts/12345',
+    industry: 'SNS運用代行会社',
+    keywords: ['SNS運用代行会社'],
+    area: '渋谷区',
+    searchArea: '渋谷区',
+    homepageTitle: 'SNS運用代行会社の紹介',
+    homepageText: '所在地 東京都渋谷区道玄坂1-1-1 SNS運用代行サービスを紹介します。',
+    extractedAddress: '東京都渋谷区道玄坂1-1-1',
+  })
+  assert.equal(result.status, 'rejected')
+  assert.ok(result.reasons.includes('unverified_official_site'))
+})
+
+test('an organic comparison article title is rejected even on a corporate domain', () => {
+  const result = evaluateCandidateRelevance({
+    ...organicBase,
+    url: 'https://agency.example.jp/marketing/tokyo-sns/',
+    sourceTitle: '東京都のSNS運用代行会社22選とSNSに長けた企業',
+    homepageTitle: '東京都のSNS運用代行会社22選とSNSに長けた企業',
+    industry: 'SNS運用代行会社',
+    keywords: ['SNS運用代行会社'],
+    area: '渋谷区',
+    searchArea: '渋谷区',
+    homepageText: '所在地 東京都渋谷区道玄坂1-1-1 SNS運用代行サービスを紹介します。',
+    extractedAddress: '東京都渋谷区道玄坂1-1-1',
+  })
+  assert.equal(result.status, 'rejected')
+  assert.ok(result.reasons.includes('unverified_official_site'))
+})
+
 test('business schema allows body evidence but directory schema does not', () => {
   const base = {
     url: 'https://example.jp/',

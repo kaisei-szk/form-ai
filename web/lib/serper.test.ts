@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { runSerperSearch } from './serper.ts'
+import { isNonOfficialOrganicTitle, runSerperSearch } from './serper.ts'
 
 type MockPlace = {
   placeId: string
@@ -19,6 +19,12 @@ function place(id: string): MockPlace {
     type: '対象業種',
   }
 }
+
+test('comparison article titles are not official HP candidates', () => {
+  assert.equal(isNonOfficialOrganicTitle('東京都のTikTok運用代行会社22選とSNSに長けた企業'), true)
+  assert.equal(isNonOfficialOrganicTitle('渋谷区のSNS運用代行会社15社をプロが厳選'), true)
+  assert.equal(isNonOfficialOrganicTitle('株式会社サンプル｜SNS運用代行'), false)
+})
 
 test('another keyword does not cause premature saturation through global deduplication', async () => {
   const pages: Record<string, MockPlace[]> = {

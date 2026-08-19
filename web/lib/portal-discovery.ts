@@ -7,6 +7,7 @@ import {
   type SerperResultItem,
 } from './serper.ts'
 import { expandIndustryTerms } from './industry-synonyms.ts'
+import { isAddressInArea } from './search-relevance.ts'
 
 /**
  * ポータル・名簿サイトを「候補発見元」として活用するモジュール（精度目標.md）。
@@ -60,9 +61,12 @@ const SNS_HOSTS = new Set([
   'youtube.com', 'line.me', 'lin.ee', 'ameblo.jp', 'note.com', 'lit.link', 'linktr.ee',
 ])
 
-const LISTING_TITLE_RE = /(?:一覧|ランキング|おすすめ|比較|口コミ|まとめ|検索|予約|サロン|店舗|選(?:！|!|\s|$))/iu
+const LISTING_TITLE_RE = /(?:一覧|ランキング|おすすめ|比較|口コミ|まとめ|検索|予約|サロン|店舗|厳選|\d+\s*(?:社|店|選|件))/iu
+const EXPLICIT_LIST_COUNT_RE = /\d+\s*(?:社|店|選|件)/u
+const LISTING_NAME_RE = /(?:一覧|ランキング|おすすめ|比較|口コミ|まとめ|検索結果|特集|厳選|費用|料金|相場|選び方|完全ガイド|徹底解説|カテゴリから|診断から|関連する記事|関連記事|\d+\s*(?:社|店|選|件))/iu
+const NON_DETAIL_PATH_RE = /\/(?:posts?|articles?|blog|blogs|news|column|columns|guide|guides|category|categories|tag|tags|privacy|terms|contact|about|service)(?:\/|$)/iu
 
-const ADDRESS_RE = /(?:北海道|東京都|(?:京都|大阪)府|[一-龠々]{2,3}県)[^\s<>"'（()]{4,50}/u
+const ADDRESS_RE = /(?:北海道|東京都|(?:京都|大阪)府|[一-龠々]{2,3}県)[^<>"'。\n]{0,35}?(?:市|区|町|村)[^<>"'。\n]{0,45}/u
 const PHONE_RE = /0\d{1,4}[-‐ー()（）\s]?\d{1,4}[-‐ー()（）\s]?\d{3,4}/u
 
 function readBoundedInt(raw: string | undefined, fallback: number, min: number, max: number): number {
@@ -72,6 +76,55 @@ function readBoundedInt(raw: string | undefined, fallback: number, min: number, 
 
 function normalizeText(value: string): string {
   return value.normalize('NFKC').toLowerCase().replace(/[\s　・･,，.。/／\\|｜「」『』【】()（）［\]\[\]{}]/g, '')
+}
+
+function decodeHtml(value: string): string {
+  return value
+    .replace(/&#x([0-9a-f]+);/giu, (_, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#(\d+);/gu, (_, decimal: string) => String.fromCodePoint(Number.parseInt(decimal, 10)))
+    .replace(/&nbsp;/giu, ' ')
+    .replace(/&amp;/giu, '&')
+    .replace(/&quot;/giu, '"')
+    .replace(/&(?:apos|#39);/giu, "'")
+    .replace(/&lt;/giu, '<')
+    .replace(/&gt;/giu, '>')
+}
+
+function htmlToText(value: string): string {
+  return decodeHtml(value
+    .replace(/<script\b[\s\S]*?<\/script>/giu, ' ')
+    .replace(/<style\b[\s\S]*?<\/style>/giu, ' ')
+    .replace(/<br\s*\/?\s*>/giu, ' ')
+    .replace(/<[^>]+>/g, ' '))
+    .replace(/[\s\u3000]+/g, ' ')
+    .trim()
+}
+
+function cleanHeading(value: string): string {
+  return htmlToText(value)
+    .replace(/^\s*(?:\d+(?:[-.．]\d+)*[.．]?|第\d+[章節])\s*/u, '')
+    .trim()
+}
+
+function looksLikeListingName(name: string): boolean {
+  return !name || name.length > 100 || LISTING_NAME_RE.test(name) || /[？?！!]$/u.test(name)
+}
+
+function usablePhone(raw: string): string {
+  const match = raw.match(PHONE_RE)?.[0]?.trim() ?? ''
+  const digits = match.replace(/\D/g, '')
+  return digits.length >= 10 && digits.length <= 11 ? match : ''
+}
+
+function usableAddress(raw: string): string {
+  const text = htmlToText(raw).replace(/〒\s*\d{3}[-ー‐]?\d{4}\s*/u, '')
+  const match = text.match(ADDRESS_RE)?.[0]?.trim() ?? ''
+  if (!match || LISTING_NAME_RE.test(match)) return ''
+  return match.split(/\s+(?:設立年|実績(?:ページ|詳細)?|価格感|資本金|代表者|URL|TEL|電話番号)/iu)[0].slice(0, 140)
+}
+
+function pageTitle(html: string): string {
+  return cleanHeading(html.match(/<title[^>]*>([\s\S]*?)<\/title>/iu)?.[1] ?? '')
 }
 
 /** 名寄せ用の正規化名。括弧内の読み仮名や法人格表記を落とす。 */
@@ -105,7 +158,17 @@ function isPortalListingUrl(url: string, title: string): boolean {
   const host = extractHost(url)
   if (!host || NON_LISTING_HOSTS.has(host) || [...NON_LISTING_HOSTS].some((d) => host.endsWith(`.${d}`))) return false
   const knownPortal = SKIP_DOMAINS.has(host) || [...SKIP_DOMAINS].some((d) => host.endsWith(`.${d}`))
-  return knownPortal || LISTING_TITLE_RE.test(title)
+  if (knownPortal) return true
+  if (EXPLICIT_LIST_COUNT_RE.test(title)) return true
+  let path = ''
+  try { path = new URL(url).pathname } catch { return false }
+  // Unknown official-company blogs often publish "おすすめ" articles. Only
+  // treat an unknown host as a listing source when both the title and URL have
+  // a list/article structure. Content extraction later still has to find
+  // individual business sections.
+  return LISTING_TITLE_RE.test(title)
+    && (/\/(?:posts?|articles?|column|columns|ranking|list|lists|search|categories)(?:\/|$)/iu.test(path)
+      || /(?:portal|navi|search|ranking|comparison)/iu.test(host))
 }
 
 async function fetchHtml(url: string, timeoutMs: number): Promise<string | null> {
@@ -191,6 +254,43 @@ function jsonLdAddress(obj: Record<string, unknown>): string {
   return ''
 }
 
+function extractSectionBusinesses(html: string, pageUrl: string): PortalBusiness[] {
+  const portalHost = extractHost(pageUrl)
+  const headings = [...html.matchAll(/<h([23])\b[^>]*>([\s\S]*?)<\/h\1>/giu)]
+  const businesses: PortalBusiness[] = []
+
+  for (let index = 0; index < headings.length; index++) {
+    const heading = headings[index]
+    const name = cleanHeading(heading[2])
+    if (looksLikeListingName(name)) continue
+    const start = (heading.index ?? 0) + heading[0].length
+    const end = headings[index + 1]?.index ?? html.length
+    const section = html.slice(start, end)
+    const address = usableAddress(section)
+    const phone = usablePhone(htmlToText(section))
+    const externalLinks = [...section.matchAll(/<a[^>]+href=["']([^"'#]+)["'][^>]*>/giu)]
+      .map(([, href]) => {
+        try { return new URL(decodeHtml(href), pageUrl).toString() } catch { return '' }
+      })
+      .filter(Boolean)
+    const officialUrl = pickOfficialUrl(externalLinks, portalHost)
+    const hasCompanyMarker = /(?:株式会社|有限会社|合同会社|合資会社|法人|事務所|医院|クリニック|サロン|美容室|美容院|商店|店舗)/u.test(name)
+    const hasStructuredProfile = /(?:会社所在地|店舗所在地|所在地|住所|電話|TEL|公式サイト|ホームページ|URL)/iu.test(htmlToText(section).slice(0, 2500))
+    if (!hasCompanyMarker && !hasStructuredProfile) continue
+    if (!address && !phone && !officialUrl) continue
+    businesses.push({
+      name,
+      address,
+      phone,
+      category: pageTitle(html),
+      officialUrl,
+      portalHost,
+      portalUrl: pageUrl,
+    })
+  }
+  return businesses
+}
+
 function pickOfficialUrl(candidates: Array<unknown>, portalHost: string): string | null {
   for (const raw of candidates) {
     if (typeof raw !== 'string' || !/^https?:\/\//i.test(raw)) continue
@@ -207,14 +307,15 @@ function pickOfficialUrl(candidates: Array<unknown>, portalHost: string): string
 export function extractBusinessesFromHtml(html: string, pageUrl: string): PortalBusiness[] {
   const portalHost = extractHost(pageUrl)
   const businesses: PortalBusiness[] = []
+  const documentTitle = pageTitle(html)
 
   for (const obj of jsonLdObjects(html)) {
     const typeString = jsonLdTypeString(obj)
     if (!typeString || !BUSINESS_TYPE_RE.test(typeString)) continue
     const name = typeof obj.name === 'string' ? obj.name.trim() : ''
-    if (!name) continue
-    const address = jsonLdAddress(obj)
-    const phone = typeof obj.telephone === 'string' ? obj.telephone.trim() : ''
+    if (!name || looksLikeListingName(name) || normalizeText(name) === normalizeText(documentTitle)) continue
+    const address = usableAddress(jsonLdAddress(obj))
+    const phone = usablePhone(typeof obj.telephone === 'string' ? obj.telephone.trim() : '')
     if (!address && !phone) continue
     const sameAs = Array.isArray(obj.sameAs) ? obj.sameAs : typeof obj.sameAs === 'string' ? [obj.sameAs] : []
     const officialUrl = pickOfficialUrl([obj.url, ...sameAs], portalHost)
@@ -228,17 +329,23 @@ export function extractBusinessesFromHtml(html: string, pageUrl: string): Portal
       portalUrl: pageUrl,
     })
   }
-  if (businesses.length > 0) return businesses
+  businesses.push(...extractSectionBusinesses(html, pageUrl))
+  if (businesses.length > 0) {
+    const unique = new Map<string, PortalBusiness>()
+    for (const business of businesses) {
+      unique.set(businessDedupeKey(business.name, business.phone, business.address), business)
+    }
+    return [...unique.values()]
+  }
 
   // JSON-LDが無い詳細ページ向けフォールバック: title＋住所・電話の正規表現
-  const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i)
-  const rawTitle = titleMatch ? titleMatch[1].trim() : ''
+  const rawTitle = documentTitle
   const name = rawTitle.split(/[|｜«»/／]/u)[0]?.trim() ?? ''
   // 「◯◯一覧」「検索結果」のような一覧見出しは事業者名として扱わない
-  if (!name || /(?:一覧|ランキング|おすすめ|比較|口コミ|まとめ|検索結果|検索|特集)/u.test(name)) return []
-  const text = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ')
-  const address = text.match(ADDRESS_RE)?.[0] ?? ''
-  const phone = text.match(PHONE_RE)?.[0] ?? ''
+  if (looksLikeListingName(name)) return []
+  const text = htmlToText(html)
+  const address = usableAddress(text)
+  const phone = usablePhone(text)
   if (!address && !phone) return []
   const officialLink = [...html.matchAll(/<a[^>]+href=["'](https?:\/\/[^"']+)["'][^>]*>([\s\S]{0,120}?)<\/a>/gi)]
     .filter(([, , label]) => /公式|オフィシャル|ホームページ|公式サイト|website/iu.test(label.replace(/<[^>]+>/g, '')))
@@ -278,6 +385,7 @@ export function extractDetailLinks(html: string, baseUrl: string, cap = 60): str
     if (abs.hostname.replace(/^www\./, '') !== baseHost) continue
     const path = abs.pathname.replace(/\/$/, '')
     if (!path || path === base.pathname.replace(/\/$/, '')) continue
+    if (NON_DETAIL_PATH_RE.test(path)) continue
     const pattern = path
       .split('/')
       .map((segment) => (/\d/.test(segment) ? 'N' : segment.length > 6 ? 'S' : segment))
@@ -354,8 +462,11 @@ async function researchOfficialUrl(
   stats: PortalDiscoveryStats,
 ): Promise<string | null> {
   // 精度目標.md 公式HPの検索方法: 事業者名＋地区 / 事業者名＋電話番号
-  const queries = [`${business.name} ${area}`]
-  if (business.phone) queries.push(`${business.name} ${business.phone}`)
+  const queries = [
+    ...(business.phone ? [`${business.name} ${business.phone}`] : []),
+    ...(business.address ? [`${business.name} ${business.address}`] : []),
+    `${business.name} ${area} 公式`,
+  ]
   const core = coreBusinessName(business.name)
 
   for (const query of queries) {
@@ -484,9 +595,12 @@ export async function runPortalDiscovery(params: {
         stats.fetchFailedCount++
         continue
       }
-      // 一覧ページ自体にJSON-LDで事業者が埋まっている場合はそのまま回収
-      extracted.push(...extractBusinessesFromHtml(html, url))
-      for (const detailUrl of extractDetailLinks(html, url)) {
+      // 一覧記事は見出し単位で個別事業者を抽出する。複数社を直接抽出
+      // できた場合、関連記事群を「詳細ページ」と誤認して辿らない。
+      const pageBusinesses = extractBusinessesFromHtml(html, url)
+      extracted.push(...pageBusinesses)
+      const detailLinks = pageBusinesses.length >= 2 ? [] : extractDetailLinks(html, url)
+      for (const detailUrl of detailLinks) {
         const normalized = normalizeCandidateUrl(detailUrl)
         if (!normalized || seenDetailUrls.has(normalized)) continue
         seenDetailUrls.add(normalized)
@@ -527,6 +641,10 @@ export async function runPortalDiscovery(params: {
   const deduped = new Map<string, PortalBusiness>()
   for (const business of extracted) {
     if (!business.name) continue
+    // A portal article can cover a wider area than the requested municipality.
+    // Keep businesses with an exact in-area address, or those without an
+    // address so the official site can provide the missing evidence later.
+    if (business.address && !isAddressInArea(business.address, params.area)) continue
     const key = businessDedupeKey(business.name, business.phone, business.address)
     if (params.existingKeys?.has(key)) continue
     const existing = deduped.get(key)

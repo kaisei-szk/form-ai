@@ -79,6 +79,10 @@ export const SKIP_DOMAINS = new Set([
   'maa-a.or.jp','ma-shoukei.com','tranbi.com','ma-japan.info',
   'biz-maps.com','careercross.com',
   'value-press.com','careerticket.jp','in-fra.jp','rocketreach.co','houjin.jp',
+  // Comparison/listing media are useful discovery sources, but must never be
+  // emitted as an official company website.
+  'web-kanji.com','boxil.jp','imitsu.jp','comparison.biz','biz.ne.jp',
+  'creators-station.jp','it-trend.jp','solution-store.honichi.com','hokihosting.com',
 ])
 
 export function extractHost(url: string): string {
@@ -102,6 +106,11 @@ export function normalizeCandidateUrl(url: string): string {
   } catch {
     return ''
   }
+}
+
+/** Titles that describe a comparison/list article rather than one business. */
+export function isNonOfficialOrganicTitle(title: string): boolean {
+  return /(?:一覧|ランキング|おすすめ|比較|口コミ|まとめ|検索|予約|求人|採用|転職|会社データ|企業データ|業者を探す|厳選|\d+\s*(?:社|店|選|件)|best\s+\d+|top\s+\d+)/iu.test(title)
 }
 
 function normalizeAreaName(rawArea: string): string {
@@ -458,7 +467,6 @@ export async function runSerperSearch(params: {
     const organicZeroNewPages = new Map<string, number>()
     const organicSeenByKeyword = new Map<string, Set<string>>()
     const seenOrganicHosts = new Set(items.map((item) => extractHost(item.link)).filter(Boolean))
-    const nonOfficialTitleRe = /(?:一覧|ランキング|おすすめ|比較|口コミ|まとめ|検索|予約|求人|採用|転職|会社データ|企業データ|業者を探す|選(?:！|!|\s|$)|best\s+\d+|top\s+\d+)/iu
     stats.organicMaxPages = organicMaxPages
 
     organicLoop: for (let page = 1; page <= organicMaxPages && items.length < resultLimit; page++) {
@@ -509,7 +517,7 @@ export async function runSerperSearch(params: {
             const host = extractHost(normalizedUrl)
             const blockedHost = !host || isNonProductionHost(host) || SKIP_DOMAINS.has(host)
               || [...SKIP_DOMAINS].some((domain) => host.endsWith(`.${domain}`))
-            if (blockedHost || nonOfficialTitleRe.test(result.title ?? '')) {
+            if (blockedHost || isNonOfficialOrganicTitle(result.title ?? '')) {
               stats.organicRejectedCount++
               continue
             }

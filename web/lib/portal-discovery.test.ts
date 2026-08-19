@@ -69,6 +69,46 @@ test('HTML fallback extracts name, address, phone and official link', () => {
   assert.equal(businesses[0].officialUrl, 'https://salon-e.example.jp/')
 })
 
+test('a listing article is split into individual businesses instead of being saved as one company', () => {
+  const html = `
+    <html><head><title>渋谷区のSNS運用代行会社15社をプロが厳選 | 比較メディア</title></head><body>
+      <h1>渋谷区のSNS運用代行会社15社をプロが厳選</h1>
+      <h2>おすすめ企業一覧</h2>
+      <h3>株式会社アルファ</h3>
+      <p>SNS運用代行を提供しています。</p>
+      <table><tr><th>URL</th><td><a href="https://alpha.example.jp/service/">公式サイト</a></td></tr>
+      <tr><th>TEL</th><td>03-1111-2222</td></tr>
+      <tr><th>会社所在地</th><td>東京都渋谷区神南1-1-1</td></tr></table>
+      <h3>株式会社ベータ</h3>
+      <p>企業SNSの運用を支援します。</p>
+      <table><tr><th>URL</th><td><a href="https://beta.example.jp/">公式サイト</a></td></tr>
+      <tr><th>所在地</th><td>東京都渋谷区道玄坂2-2-2</td></tr></table>
+      <h2>関連する記事</h2>
+      <a href="https://another-media.example.jp/posts/ranking">関連記事</a>
+    </body></html>`
+
+  const businesses = extractBusinessesFromHtml(html, 'https://portal.example.jp/posts/shibuya-sns')
+  assert.deepEqual(businesses.map((business) => business.name), ['株式会社アルファ', '株式会社ベータ'])
+  assert.deepEqual(businesses.map((business) => business.officialUrl), [
+    'https://alpha.example.jp/service/',
+    'https://beta.example.jp/',
+  ])
+})
+
+test('a listing article title is never emitted as an unresolved business', () => {
+  const html = `<html><head><title>東京都のSNS運用代行会社15社をプロが厳選</title></head>
+    <body><p>掲載企業 TEL 03-6455-3088</p><p>東京都渋谷区円山町19-1</p></body></html>`
+  assert.deepEqual(extractBusinessesFromHtml(html, 'https://portal.example.jp/posts/sns-tokyo'), [])
+})
+
+test('postal codes and partial numbers are not accepted as phone numbers', () => {
+  const html = `<html><head><title>株式会社ガンマ</title></head>
+    <body><p>〒003-0002 北海道札幌市白石区東札幌2条4丁目9-2</p></body></html>`
+  const businesses = extractBusinessesFromHtml(html, 'https://portal.example.jp/companies/gamma')
+  assert.equal(businesses.length, 1)
+  assert.equal(businesses[0].phone, '')
+})
+
 test('detail links are the dominant repeated same-host pattern', () => {
   const anchors = Array.from({ length: 12 }, (_, i) => `<a href="/shops/salon-${i}/detail${i}">salon ${i}</a>`).join('')
   const html = `<html><body>
@@ -80,6 +120,11 @@ test('detail links are the dominant repeated same-host pattern', () => {
   const links = extractDetailLinks(html, 'https://portal.example.com/list')
   assert.equal(links.length, 12)
   assert.ok(links.every((link) => link.includes('/shops/')))
+})
+
+test('related article links are not mistaken for business detail pages', () => {
+  const anchors = Array.from({ length: 12 }, (_, i) => `<a href="/posts/article-${i}">article ${i}</a>`).join('')
+  assert.deepEqual(extractDetailLinks(`<body>${anchors}</body>`, 'https://portal.example.com/posts/list'), [])
 })
 
 test('the same business found on two portals dedupes by phone', () => {
