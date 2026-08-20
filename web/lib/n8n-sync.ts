@@ -6,7 +6,7 @@
 
 import { getAllProjectRuns, getProjectRun, updateRunStatus, rollupBatchRun } from './project-manager'
 import { markJobDone } from './run-queue'
-import { findExecutionByRunId, getExecution } from './n8n-client'
+import { executionErrorMessage, findExecutionByRunId, getExecution } from './n8n-client'
 
 /** GPT-4o-mini pricing (USD per 1M tokens) */
 const PRICING = {
@@ -26,77 +26,67 @@ export function calcCostUsd(model: string, inputTokens: number, outputTokens: nu
  * check n8n and update status. Returns true if status changed.
  */
 export async function syncRun(runId: string, n8nExecutionId: string): Promise<boolean> {
+  const exec = await getExecution(n8nExecutionId)
+  if (!exec.finished && exec.status !== 'error' && exec.status !== 'canceled') return false
+
+  const finalStatus = exec.status === 'success' ? 'success' : 'error'
+  const errorMessage = executionErrorMessage(exec)
+
+  // Extract token usage from n8n execution data if available
+  let tokensInput: number | undefined
+  let tokensOutput: number | undefined
+  let estimatedCostUsd: number | undefined
+
   try {
-    const exec = await getExecution(n8nExecutionId)
-    if (!exec.finished && exec.status !== 'error') return false
-
-    const finalStatus = exec.status === 'success' ? 'success' : 'error'
-    const executionError = exec.data?.resultData?.error
-    const errorParts = [
-      executionError?.node?.name ? `${executionError.node.name}` : undefined,
-      executionError?.description,
-      executionError?.message,
-    ].filter((part): part is string => Boolean(part))
-    const errorMessage = [...new Set(errorParts)].join(': ') || 'n8nワークフローの実行に失敗しました'
-
-    // Extract token usage from n8n execution data if available
-    let tokensInput: number | undefined
-    let tokensOutput: number | undefined
-    let estimatedCostUsd: number | undefined
-
-    try {
-      const runData = exec.data?.resultData?.runData
-      if (runData) {
-        let totalInput = 0
-        let totalOutput = 0
-        for (const nodeResults of Object.values(runData)) {
-          for (const item of (nodeResults as unknown[])) {
-            const usage = (item as { data?: { main?: [{ json?: { usage?: { prompt_tokens?: number; completion_tokens?: number } } }][] } })
-              ?.data?.main?.[0]?.[0]?.json?.usage
-            if (usage) {
-              totalInput += usage.prompt_tokens ?? 0
-              totalOutput += usage.completion_tokens ?? 0
-            }
+    const runData = exec.data?.resultData?.runData
+    if (runData) {
+      let totalInput = 0
+      let totalOutput = 0
+      for (const nodeResults of Object.values(runData)) {
+        for (const item of (nodeResults as unknown[])) {
+          const usage = (item as { data?: { main?: [{ json?: { usage?: { prompt_tokens?: number; completion_tokens?: number } } }][] } })
+            ?.data?.main?.[0]?.[0]?.json?.usage
+          if (usage) {
+            totalInput += usage.prompt_tokens ?? 0
+            totalOutput += usage.completion_tokens ?? 0
           }
         }
-        if (totalInput > 0 || totalOutput > 0) {
-          tokensInput = totalInput
-          tokensOutput = totalOutput
-          estimatedCostUsd = calcCostUsd('gpt-4o-mini', totalInput, totalOutput)
-        }
       }
-    } catch {
-      // Token extraction is best-effort
+      if (totalInput > 0 || totalOutput > 0) {
+        tokensInput = totalInput
+        tokensOutput = totalOutput
+        estimatedCostUsd = calcCostUsd('gpt-4o-mini', totalInput, totalOutput)
+      }
     }
-
-    await updateRunStatus(runId, finalStatus, n8nExecutionId, undefined, {
-      tokensInput,
-      tokensOutput,
-      estimatedCostUsd,
-      completedAt: exec.stoppedAt ?? new Date().toISOString(),
-      error: finalStatus === 'error' ? errorMessage : undefined,
-    })
-
-    const completedRun = await getProjectRun(runId)
-    if (completedRun?.parentRunId) {
-      await rollupBatchRun(completedRun.parentRunId)
-    }
-
-    // Also mark the queue job as done and trigger next
-    const nextJob = await markJobDone(
-      runId,
-      finalStatus === 'success' ? 'completed' : 'failed',
-      finalStatus === 'error' ? errorMessage : undefined,
-    )
-    if (nextJob) {
-      // Fire the next queued job in the background
-      triggerQueuedJob(nextJob.runId, nextJob.params).catch(() => {})
-    }
-
-    return true
   } catch {
-    return false
+    // Token extraction is best-effort
   }
+
+  await updateRunStatus(runId, finalStatus, n8nExecutionId, undefined, {
+    tokensInput,
+    tokensOutput,
+    estimatedCostUsd,
+    completedAt: exec.stoppedAt ?? new Date().toISOString(),
+    error: finalStatus === 'error' ? errorMessage : undefined,
+  })
+
+  const completedRun = await getProjectRun(runId)
+  if (completedRun?.parentRunId) {
+    await rollupBatchRun(completedRun.parentRunId)
+  }
+
+  // Also mark the queue job as done and trigger next
+  const nextJob = await markJobDone(
+    runId,
+    finalStatus === 'success' ? 'completed' : 'failed',
+    finalStatus === 'error' ? errorMessage : undefined,
+  )
+  if (nextJob) {
+    // Fire the next queued job in the background
+    triggerQueuedJob(nextJob.runId, nextJob.params).catch(() => {})
+  }
+
+  return true
 }
 
 /**

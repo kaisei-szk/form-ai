@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
-import { updateRunStatus, getProjectRun, rollupBatchRun } from '@/lib/project-manager'
+import { updateRunStatus, getProjectRun, getRunSearchCheckpoint, rollupBatchRun } from '@/lib/project-manager'
 import { markJobDone, isQueueIdle } from '@/lib/run-queue'
 import { calcCostUsd } from '@/lib/n8n-sync'
 import { countCompanies, upsertRunCompanies } from '@/lib/companies-db'
@@ -177,6 +177,8 @@ export async function POST(
       ?? Math.max(0, expectedCandidateCount - processedCandidateCount)
     const resultSetComplete = body.results?.resultSetComplete
       ?? pendingCandidateCount === 0
+    const discoveryIncomplete = body.results?.searchTimeBudgetReached === true
+      || body.results?.portalDeadlineReached === true
     const normalizedResults = body.results ? {
       ...body.results,
       itemsWritten,
@@ -184,11 +186,22 @@ export async function POST(
       processedCandidateCount,
       pendingCandidateCount,
       resultSetComplete,
+      ...(existingRun?.results?.searchProgress ? {
+        searchProgress: {
+          ...existingRun.results.searchProgress,
+          resumeAvailable: discoveryIncomplete,
+        },
+      } : {}),
     } : undefined
+    const preservedCheckpoint = discoveryIncomplete
+      ? await getRunSearchCheckpoint(runId)
+      : undefined
 
     const incompleteResultSet = body.status === 'success' && !resultSetComplete
-    const finalStatus = incompleteResultSet ? 'error' : body.status
-    const finalError = incompleteResultSet
+    const finalStatus = incompleteResultSet || discoveryIncomplete ? 'error' : body.status
+    const finalError = discoveryIncomplete
+      ? '検索の時間予算に到達しました。途中結果と再開位置を保存済みです。「続きから再開」で処理を継続できます。'
+      : incompleteResultSet
       ? `結果の完全性を確認できませんでした: ${processedCandidateCount}/${expectedCandidateCount}件処理済み、未処理${pendingCandidateCount}件、失敗バッチ${body.results?.failedBatchCount ?? 0}件`
       : body.error
 
@@ -200,6 +213,7 @@ export async function POST(
       completedAt: new Date().toISOString(),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       results: normalizedResults as any,
+      searchCheckpoint: preservedCheckpoint,
       error: finalStatus === 'error' ? (finalError ?? 'Unknown error') : undefined,
     })
 

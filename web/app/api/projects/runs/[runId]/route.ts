@@ -10,6 +10,7 @@ import { z } from 'zod'
 export async function GET(_req: NextRequest, { params }: { params: { runId: string } }) {
   try {
     let run = await getProjectRun(params.runId)
+    let syncError: string | undefined
     if (!run) return NextResponse.json({ success: false, error: 'Not found' }, { status: 404 })
 
     // Completion callback前にn8nが失敗した場合も、個別ポーリングだけで
@@ -31,8 +32,9 @@ export async function GET(_req: NextRequest, { params }: { params: { runId: stri
           }
         }
         run = await getProjectRun(params.runId) ?? run
-      } catch {
-        // n8nの一時的な通信エラーではDBにある直近状態を返す。
+      } catch (error) {
+        // DB上の状態は保持するが、n8n照合失敗を隠さず画面へ返す。
+        syncError = `n8n状態確認エラー: ${getErrorMessage(error)}`
       }
     }
 
@@ -40,7 +42,7 @@ export async function GET(_req: NextRequest, { params }: { params: { runId: stri
     const queuePosition = (run.status === 'pending' || run.status === 'running')
       ? await getQueuePosition(params.runId)
       : 0
-    return NextResponse.json({ success: true, data: { ...run, queuePosition } })
+    return NextResponse.json({ success: true, data: { ...run, queuePosition, syncError } })
   } catch (e) {
     return NextResponse.json({ success: false, error: getErrorMessage(e) }, { status: 500 })
   }

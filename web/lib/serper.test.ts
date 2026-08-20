@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isNonOfficialOrganicTitle, runSerperSearch } from './serper.ts'
+import { isNonOfficialOrganicTitle, runSerperSearch, type SerperSearchCheckpoint } from './serper.ts'
 
 type MockPlace = {
   placeId: string
@@ -111,44 +111,160 @@ test('one empty page is retried before a query is considered exhausted', async (
   }
 })
 
-test('organic pagination stops after two pages add no new company hosts', async () => {
+test('organic query stops after two pages add no new company hosts', async () => {
   const originalFetch = globalThis.fetch
   const originalOrganicPages = process.env.SERPER_ORGANIC_MAX_PAGES
   const originalOrganicLimit = process.env.SERPER_ORGANIC_QUERY_LIMIT
+  const originalConcurrency = process.env.SERPER_CONCURRENCY
   process.env.SERPER_ORGANIC_MAX_PAGES = '4'
   process.env.SERPER_ORGANIC_QUERY_LIMIT = '1'
-
+  process.env.SERPER_CONCURRENCY = '1'
+  const organicPages: number[] = []
   globalThis.fetch = async (input, init) => {
     const body = JSON.parse(String(init?.body)) as { page: number }
     if (String(input).includes('/places')) {
       return new Response(JSON.stringify({ places: [] }), { status: 200 })
     }
-    const host = body.page === 4 ? 'new.example.com' : 'same.example.com'
+    organicPages.push(body.page)
+    const host = body.page < 4 ? 'same-company.example.com' : 'new-company.example.com'
     return new Response(JSON.stringify({
       organic: [{
-        title: `株式会社候補 page ${body.page}`,
         link: `https://${host}/page-${body.page}`,
-        snippet: '',
+        title: '株式会社サンプル｜公式サイト',
+        snippet: '対象サービスを提供しています',
       }],
     }), { status: 200 })
   }
 
   try {
     const result = await runSerperSearch({
-      keywords: ['対象業種'],
+      keywords: ['SNS運用会社'],
       area: '渋谷区',
       maxPages: 1,
       requestDelayMs: 0,
       apiKey: 'test-key',
     })
-    assert.equal(result.stats.organicQueriesExecuted, 3)
+    assert.deepEqual(organicPages, [1, 2, 3])
     assert.equal(result.stats.organicExhaustedQueryCount, 1)
-    assert.deepEqual(result.items.map((item) => item.link), ['https://same.example.com/page-1'])
+    assert.equal(result.items.filter((item) => item.source === 'organic').length, 1)
+    assert.equal(result.items.some((item) => item.link.includes('new-company')), false)
   } finally {
     globalThis.fetch = originalFetch
     if (originalOrganicPages === undefined) delete process.env.SERPER_ORGANIC_MAX_PAGES
     else process.env.SERPER_ORGANIC_MAX_PAGES = originalOrganicPages
     if (originalOrganicLimit === undefined) delete process.env.SERPER_ORGANIC_QUERY_LIMIT
     else process.env.SERPER_ORGANIC_QUERY_LIMIT = originalOrganicLimit
+    if (originalConcurrency === undefined) delete process.env.SERPER_CONCURRENCY
+    else process.env.SERPER_CONCURRENCY = originalConcurrency
+  }
+})
+
+test('organic checkpoints are safe to persist in PostgreSQL jsonb', async () => {
+  const originalFetch = globalThis.fetch
+  const originalOrganicPages = process.env.SERPER_ORGANIC_MAX_PAGES
+  const originalOrganicLimit = process.env.SERPER_ORGANIC_QUERY_LIMIT
+  const originalConcurrency = process.env.SERPER_CONCURRENCY
+  process.env.SERPER_ORGANIC_MAX_PAGES = '1'
+  process.env.SERPER_ORGANIC_QUERY_LIMIT = '1'
+  process.env.SERPER_CONCURRENCY = '1'
+  let organicCheckpoint: SerperSearchCheckpoint | undefined
+
+  globalThis.fetch = async (input) => {
+    if (String(input).includes('/places')) {
+      return new Response(JSON.stringify({ places: [] }), { status: 200 })
+    }
+    return new Response(JSON.stringify({
+      organic: [{
+        link: 'https://safe-checkpoint.example.com/',
+        title: '株式会社サンプル｜公式サイト',
+        snippet: 'SNS運用サービスを提供しています',
+      }],
+    }), { status: 200 })
+  }
+
+  try {
+    await runSerperSearch({
+      keywords: ['SNS運用会社'],
+      area: '渋谷区',
+      maxPages: 1,
+      requestDelayMs: 0,
+      apiKey: 'test-key',
+      onProgress: (_progress, checkpoint) => {
+        if (checkpoint?.phase === 'complete') organicCheckpoint = checkpoint
+      },
+    })
+
+    assert.ok(organicCheckpoint)
+    const serialized = JSON.stringify(organicCheckpoint)
+    assert.equal(serialized.includes('\\u0000'), false)
+    assert.deepEqual(
+      organicCheckpoint.organicSeenByKeyword.map(([key]) => key),
+      ['["SNS運用会社","公式"]'],
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalOrganicPages === undefined) delete process.env.SERPER_ORGANIC_MAX_PAGES
+    else process.env.SERPER_ORGANIC_MAX_PAGES = originalOrganicPages
+    if (originalOrganicLimit === undefined) delete process.env.SERPER_ORGANIC_QUERY_LIMIT
+    else process.env.SERPER_ORGANIC_QUERY_LIMIT = originalOrganicLimit
+    if (originalConcurrency === undefined) delete process.env.SERPER_CONCURRENCY
+    else process.env.SERPER_CONCURRENCY = originalConcurrency
+  }
+})
+
+test('completed page checkpoint resumes from the next page after time budget', async () => {
+  const originalFetch = globalThis.fetch
+  const originalConcurrency = process.env.SERPER_CONCURRENCY
+  process.env.SERPER_CONCURRENCY = '1'
+  const firstPages: number[] = []
+  let savedCheckpoint: SerperSearchCheckpoint | undefined
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { page: number }
+    firstPages.push(body.page)
+    if (body.page === 1) await new Promise((resolve) => setTimeout(resolve, 15))
+    return new Response(JSON.stringify({ places: [place(`P${body.page}`)] }), { status: 200 })
+  }
+
+  try {
+    const first = await runSerperSearch({
+      keywords: ['C'],
+      area: '渋谷区',
+      maxPages: 2,
+      includeOrganic: false,
+      requestDelayMs: 0,
+      timeBudgetMs: 10,
+      apiKey: 'test-key',
+      onProgress: (_progress, checkpoint) => {
+        if (checkpoint) savedCheckpoint = checkpoint
+      },
+    })
+    assert.equal(first.stats.searchTimeBudgetReached, true)
+    assert.deepEqual(firstPages, [1])
+    assert.equal(savedCheckpoint?.phase, 'places')
+    assert.equal(savedCheckpoint?.nextPage, 2)
+
+    const resumedPages: number[] = []
+    globalThis.fetch = async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { page: number }
+      resumedPages.push(body.page)
+      return new Response(JSON.stringify({ places: [place(`P${body.page}`)] }), { status: 200 })
+    }
+    const resumed = await runSerperSearch({
+      keywords: ['C'],
+      area: '渋谷区',
+      maxPages: 2,
+      includeOrganic: false,
+      requestDelayMs: 0,
+      timeBudgetMs: 1_000,
+      checkpoint: savedCheckpoint,
+      apiKey: 'test-key',
+    })
+    assert.deepEqual(resumedPages, [2])
+    assert.deepEqual(resumed.items.map((item) => item.placeId), ['P1', 'P2'])
+    assert.equal(resumed.stats.searchTimeBudgetReached, false)
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalConcurrency === undefined) delete process.env.SERPER_CONCURRENCY
+    else process.env.SERPER_CONCURRENCY = originalConcurrency
   }
 })

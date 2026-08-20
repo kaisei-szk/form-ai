@@ -65,6 +65,29 @@ create table if not exists public.project_runs (
 create index if not exists idx_project_runs_project_id on public.project_runs(project_id);
 create index if not exists idx_project_runs_parent_run_id on public.project_runs(parent_run_id);
 
+-- Discovery-stage website candidates are intentionally stored separately from
+-- companies. Only companies are allowed into the normal results/CSV/Sheets.
+create table if not exists public.search_candidates (
+  id             text primary key,
+  project_id     text not null references public.projects(id) on delete cascade,
+  run_id         text not null references public.project_runs(id) on delete cascade,
+  name           text not null default '',
+  url            text not null,
+  normalized_url text not null,
+  source         text not null default '',
+  keyword        text not null default '',
+  area           text not null default '',
+  address        text not null default '',
+  phone          text not null default '',
+  category       text not null default '',
+  discovered_at  text not null,
+  unique(run_id, normalized_url)
+);
+
+create index if not exists idx_search_candidates_project_id on public.search_candidates(project_id);
+create index if not exists idx_search_candidates_run_id on public.search_candidates(run_id);
+create index if not exists idx_search_candidates_normalized_url on public.search_candidates(normalized_url);
+
 create table if not exists public.queue_jobs (
   id            text primary key,
   run_id        text not null,
@@ -89,6 +112,7 @@ create table if not exists public.presets (
 alter table public.companies enable row level security;
 alter table public.projects enable row level security;
 alter table public.project_runs enable row level security;
+alter table public.search_candidates enable row level security;
 alter table public.queue_jobs enable row level security;
 alter table public.presets enable row level security;
 

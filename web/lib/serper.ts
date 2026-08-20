@@ -52,6 +52,42 @@ export interface SerperSearchStats {
   normalizedArea: string
 }
 
+export type SerperSearchPhase = 'places' | 'organic' | 'complete'
+
+export interface SerperSearchProgress {
+  phase: SerperSearchPhase
+  nextPage: number
+  maxPages: number
+  candidateCount: number
+  rawCandidateCount: number
+  queriesExecuted: number
+  exhaustedQueryCount: number
+  searchElapsedMs: number
+  resumeAvailable: boolean
+  updatedAt: string
+}
+
+export interface SerperSearchCheckpoint {
+  version: 1
+  signature: string
+  phase: SerperSearchPhase
+  nextPage: number
+  items: SerperResultItem[]
+  noWebsitePlaces: NoWebsitePlace[]
+  seenPlaces: string[]
+  seenPlacesByKeyword: Array<[string, string[]]>
+  seenUrls: string[]
+  exhaustedQueries: string[]
+  zeroNewPages: Array<[string, number]>
+  organicExhausted: string[]
+  organicZeroNewPages: Array<[string, number]>
+  organicSeenByKeyword: Array<[string, string[]]>
+  seenOrganicHosts: string[]
+  stats: SerperSearchStats
+  errors: Array<{ status: number; text: string }>
+  updatedAt: string
+}
+
 // ポータル・SNS・アグリゲータドメイン — 公式HP候補からは除外する。
 // ただしポータルは portal-discovery で「候補発見元」として別途活用する。
 export const SKIP_DOMAINS = new Set([
@@ -254,6 +290,12 @@ export async function runSerperSearch(params: {
   maxPages?: number
   includeOrganic?: boolean
   requestDelayMs?: number
+  timeBudgetMs?: number
+  checkpoint?: SerperSearchCheckpoint
+  onProgress?: (
+    progress: SerperSearchProgress,
+    checkpoint?: SerperSearchCheckpoint,
+  ) => Promise<void> | void
   apiKey: string
 }): Promise<{
   items: SerperResultItem[]
@@ -263,14 +305,12 @@ export async function runSerperSearch(params: {
   errors: Array<{ status: number; text: string }>
 }> {
   const startedAt = Date.now()
-  // Vercel等の300秒制限下ではデフォルト240秒。ローカル/セルフホストでは
-  // SERPER_TIME_BUDGET_MS で最長30分まで拡大できる。
-  const timeBudgetMs = readBoundedInt(process.env.SERPER_TIME_BUDGET_MS, 240_000, 60_000, 1_800_000)
+  const timeBudgetMs = params.timeBudgetMs
+    ?? readBoundedInt(process.env.SERPER_TIME_BUDGET_MS, 240_000, 60_000, 1_800_000)
   const deadline = startedAt + timeBudgetMs
+  const deadlineMarginMs = params.timeBudgetMs === undefined ? 35_000 : 0
   let searchTimeBudgetReached = false
-  // Leave enough room for one worst-case 30-second Serper request batch and
-  // response serialization before the platform's 300-second hard timeout.
-  const hasTimeForBatch = () => Date.now() < deadline - 35_000
+  const hasTimeForBatch = () => Date.now() < deadline - deadlineMarginMs
   const normalizedArea = normalizeAreaName(params.area)
   const inputKeywords = [...new Set(params.keywords
     .map((keyword) => keyword.normalize('NFKC').trim())
@@ -282,22 +322,25 @@ export async function runSerperSearch(params: {
     .filter((keyword) => !inputKeywords.includes(keyword))
   const keywords = [...inputKeywords, ...synonymKeywords].slice(0, 30)
   const resultLimit = params.maxResults && params.maxResults > 0 ? params.maxResults : Number.POSITIVE_INFINITY
-  // A finite cap protects API credits, while still allowing operators to raise
-  // the depth without changing code when a broad category has not saturated.
   const maxPages = params.maxPages ?? readBoundedInt(process.env.SERPER_MAX_PAGES, 50, 1, 50)
   const concurrency = readBoundedInt(process.env.SERPER_CONCURRENCY, 5, 1, 10)
   const requestDelayMs = params.requestDelayMs
     ?? readBoundedInt(process.env.REQUEST_DELAY_MS, 1_100, 0, 10_000)
-  const seenPlaces = new Set<string>()
-  const seenPlacesByKeyword = new Map<string, Set<string>>()
-  const seenUrls = new Set<string>()
-  const exhaustedQueries = new Set<string>()
-  const zeroNewPages = new Map<string, number>()
-  const items: SerperResultItem[] = []
-  const noWebsitePlaces: NoWebsitePlace[] = []
-  const errors: Array<{ status: number; text: string }> = []
-
-  const stats: SerperSearchStats = {
+  const organicMaxPages = readBoundedInt(process.env.SERPER_ORGANIC_MAX_PAGES, 20, 1, 20)
+  const organicQueryLimit = readBoundedInt(process.env.SERPER_ORGANIC_QUERY_LIMIT, 30, 1, 60)
+  const signature = JSON.stringify({
+    normalizedArea,
+    keywords,
+    maxPages,
+    organicMaxPages,
+    organicQueryLimit,
+    includeOrganic: params.includeOrganic !== false,
+    maxResults: params.maxResults ?? 0,
+  })
+  const resume = params.checkpoint?.version === 1 && params.checkpoint.signature === signature
+    ? params.checkpoint
+    : undefined
+  const freshStats: SerperSearchStats = {
     queriesExecuted: 0,
     failedQueries: 0,
     organicQueriesExecuted: 0,
@@ -325,160 +368,209 @@ export async function runSerperSearch(params: {
     keywordsUsed: keywords,
     normalizedArea,
   }
+  const stats: SerperSearchStats = resume ? { ...freshStats, ...resume.stats } : freshStats
+  const priorElapsedMs = resume?.stats.searchElapsedMs ?? 0
+  stats.searchTimeBudgetReached = false
+  const items = [...(resume?.items ?? [])]
+  const noWebsitePlaces = [...(resume?.noWebsitePlaces ?? [])]
+  const seenPlaces = new Set(resume?.seenPlaces ?? [])
+  const seenPlacesByKeyword = new Map((resume?.seenPlacesByKeyword ?? []).map(([key, values]) => [key, new Set(values)]))
+  const seenUrls = new Set(resume?.seenUrls ?? [])
+  const exhaustedQueries = new Set(resume?.exhaustedQueries ?? [])
+  const zeroNewPages = new Map(resume?.zeroNewPages ?? [])
+  const errors = [...(resume?.errors ?? [])]
+  const organicVariants = ['公式', '会社概要', '']
+  const organicQueries = organicVariants
+    .flatMap((variant) => keywords.map((keyword) => ({
+      // PostgreSQL jsonb cannot store U+0000. This key is persisted inside
+      // search checkpoints, so use a collision-safe JSON tuple instead of a
+      // NUL-delimited string.
+      key: JSON.stringify([keyword, variant || 'plain']),
+      keyword,
+      query: [keyword, normalizedArea, variant].filter(Boolean).join(' '),
+    })))
+    .slice(0, organicQueryLimit)
+  const organicExhausted = new Set(resume?.organicExhausted ?? [])
+  const organicZeroNewPages = new Map(resume?.organicZeroNewPages ?? [])
+  const organicSeenByKeyword = new Map((resume?.organicSeenByKeyword ?? []).map(([key, values]) => [key, new Set(values)]))
+  const seenOrganicHosts = new Set(resume?.seenOrganicHosts ?? items.map((item) => extractHost(item.link)).filter(Boolean))
+  let phase: SerperSearchPhase = resume?.phase ?? 'places'
+  let nextPage = resume?.nextPage ?? 1
+  let resumeAvailable = Boolean(resume && resume.phase !== 'complete')
 
-  // Page-major ordering spreads requests across every independent retrieval
-  // term before going deeper into any one result set. No AND/OR query syntax or
-  // contact-form suffix is used.
-  placesLoop: for (let page = 1; page <= maxPages && items.length < resultLimit; page++) {
-    const activeKeywords = keywords.filter((keyword) => !exhaustedQueries.has(keyword))
-    if (activeKeywords.length === 0) break
+  const refreshStats = () => {
+    stats.candidateCount = items.length
+    stats.exhaustedQueryCount = exhaustedQueries.size
+    stats.pageCapReachedQueryCount = keywords.filter((keyword) => !exhaustedQueries.has(keyword)).length
+    stats.organicExhaustedQueryCount = organicExhausted.size
+    stats.organicPageCapReachedQueryCount = organicQueries.filter((query) => !organicExhausted.has(query.key)).length
+    stats.searchElapsedMs = priorElapsedMs + Date.now() - startedAt
+  }
+  const makeCheckpoint = (checkpointPhase: SerperSearchPhase, checkpointNextPage: number): SerperSearchCheckpoint => {
+    refreshStats()
+    return {
+      version: 1,
+      signature,
+      phase: checkpointPhase,
+      nextPage: checkpointNextPage,
+      items: [...items],
+      noWebsitePlaces: [...noWebsitePlaces],
+      seenPlaces: [...seenPlaces],
+      seenPlacesByKeyword: [...seenPlacesByKeyword].map(([key, values]) => [key, [...values]]),
+      seenUrls: [...seenUrls],
+      exhaustedQueries: [...exhaustedQueries],
+      zeroNewPages: [...zeroNewPages],
+      organicExhausted: [...organicExhausted],
+      organicZeroNewPages: [...organicZeroNewPages],
+      organicSeenByKeyword: [...organicSeenByKeyword].map(([key, values]) => [key, [...values]]),
+      seenOrganicHosts: [...seenOrganicHosts],
+      stats: { ...stats },
+      errors: [...errors],
+      updatedAt: new Date().toISOString(),
+    }
+  }
+  const publishProgress = async (checkpoint?: SerperSearchCheckpoint) => {
+    if (checkpoint) resumeAvailable = checkpoint.phase !== 'complete'
+    refreshStats()
+    const phaseMaxPages = phase === 'places' ? maxPages : phase === 'organic' ? organicMaxPages : 0
+    await params.onProgress?.({
+      phase,
+      nextPage,
+      maxPages: phaseMaxPages,
+      candidateCount: items.length,
+      rawCandidateCount: stats.rawCandidateCount,
+      queriesExecuted: stats.queriesExecuted,
+      exhaustedQueryCount: phase === 'places' ? exhaustedQueries.size : organicExhausted.size,
+      searchElapsedMs: stats.searchElapsedMs,
+      resumeAvailable,
+      updatedAt: new Date().toISOString(),
+    }, checkpoint)
+  }
 
-    for (let offset = 0; offset < activeKeywords.length && items.length < resultLimit; offset += concurrency) {
-      if (!hasTimeForBatch()) {
-        searchTimeBudgetReached = true
-        break placesLoop
-      }
-      const batch = activeKeywords.slice(offset, offset + concurrency)
-      const responses = await Promise.all(batch.map(async (keyword) => ({
-        keyword,
-        response: await fetchPlacesPage(`${keyword} ${normalizedArea}`, page, params.apiKey),
-      })))
-      stats.queriesExecuted += batch.length
-
-      for (const { keyword, response } of responses) {
-        if (response.error) {
-          stats.failedQueries++
-          errors.push(response.error)
-          continue
+  if (phase === 'places') {
+    let placesCompleted = true
+    placesLoop: for (let page = nextPage; page <= maxPages && items.length < resultLimit; page++) {
+      const activeKeywords = keywords.filter((keyword) => !exhaustedQueries.has(keyword))
+      if (activeKeywords.length === 0) break
+      for (let offset = 0; offset < activeKeywords.length && items.length < resultLimit; offset += concurrency) {
+        if (!hasTimeForBatch()) {
+          searchTimeBudgetReached = true
+          placesCompleted = false
+          nextPage = page
+          await publishProgress()
+          break placesLoop
         }
-
-        const places = response.places ?? []
-        let newPlacesOnPage = 0
-        stats.rawCandidateCount += places.length
-        const keywordSeen = seenPlacesByKeyword.get(keyword) ?? new Set<string>()
-        seenPlacesByKeyword.set(keyword, keywordSeen)
-
-        for (const place of places) {
-          const placeKey = place.placeId || place.cid || `${place.title ?? ''}|${place.address ?? ''}`
-          if (!placeKey) {
-            stats.duplicateCount++
+        const batch = activeKeywords.slice(offset, offset + concurrency)
+        const responses = await Promise.all(batch.map(async (keyword) => ({
+          keyword,
+          response: await fetchPlacesPage(`${keyword} ${normalizedArea}`, page, params.apiKey),
+        })))
+        stats.queriesExecuted += batch.length
+        for (const { keyword, response } of responses) {
+          if (response.error) {
+            stats.failedQueries++
+            errors.push(response.error)
             continue
           }
-
-          // Saturation is per query. A place found earlier through another
-          // synonym must still count as new for this keyword, otherwise later
-          // keywords are incorrectly stopped after two pages.
-          if (keywordSeen.has(placeKey)) {
-            stats.paginationRepeatCount++
-            continue
-          }
-          keywordSeen.add(placeKey)
-          newPlacesOnPage++
-
-          // Final output remains globally deduplicated across all synonyms.
-          if (seenPlaces.has(placeKey)) {
-            stats.duplicateCount++
-            continue
-          }
-          seenPlaces.add(placeKey)
-          stats.uniquePlaceCount++
-
-          const link = place.website?.trim() ?? ''
-          if (!link) {
-            stats.noWebsiteCount++
-            if ((place.title ?? '').trim() && isAddressInRequestedArea(place.address ?? '', normalizedArea)) {
-              noWebsitePlaces.push({
-                name: (place.title ?? '').trim(),
-                address: place.address ?? '',
-                phone: place.phoneNumber ?? '',
-                category: [...new Set([place.type, place.category, ...(place.types ?? [])].filter(Boolean))].join(' / '),
-                placeId: place.placeId ?? place.cid ?? placeKey,
-              })
+          const places = response.places ?? []
+          let newPlacesOnPage = 0
+          stats.rawCandidateCount += places.length
+          const keywordSeen = seenPlacesByKeyword.get(keyword) ?? new Set<string>()
+          seenPlacesByKeyword.set(keyword, keywordSeen)
+          for (const place of places) {
+            const placeKey = place.placeId || place.cid || `${place.title ?? ''}|${place.address ?? ''}`
+            if (!placeKey) {
+              stats.duplicateCount++
+              continue
             }
-            continue
+            if (keywordSeen.has(placeKey)) {
+              stats.paginationRepeatCount++
+              continue
+            }
+            keywordSeen.add(placeKey)
+            newPlacesOnPage++
+            if (seenPlaces.has(placeKey)) {
+              stats.duplicateCount++
+              continue
+            }
+            seenPlaces.add(placeKey)
+            stats.uniquePlaceCount++
+            const link = place.website?.trim() ?? ''
+            if (!link) {
+              stats.noWebsiteCount++
+              if ((place.title ?? '').trim() && isAddressInRequestedArea(place.address ?? '', normalizedArea)) {
+                noWebsitePlaces.push({
+                  name: (place.title ?? '').trim(),
+                  address: place.address ?? '',
+                  phone: place.phoneNumber ?? '',
+                  category: [...new Set([place.type, place.category, ...(place.types ?? [])].filter(Boolean))].join(' / '),
+                  placeId: place.placeId ?? place.cid ?? placeKey,
+                })
+              }
+              continue
+            }
+            if (!isAddressInRequestedArea(place.address ?? '', normalizedArea)) {
+              stats.areaRejectedCount++
+              continue
+            }
+            const host = extractHost(link)
+            if (!host || isNonProductionHost(host) || SKIP_DOMAINS.has(host) || [...SKIP_DOMAINS].some((domain) => host.endsWith(`.${domain}`))) {
+              stats.blockedDomainCount++
+              continue
+            }
+            const normalizedUrl = normalizeCandidateUrl(link)
+            if (!normalizedUrl || seenUrls.has(normalizedUrl)) {
+              stats.duplicateCount++
+              continue
+            }
+            seenUrls.add(normalizedUrl)
+            items.push({
+              link,
+              title: place.title ?? '',
+              snippet: place.description ?? '',
+              keyword,
+              area: normalizedArea,
+              source: 'places',
+              address: place.address ?? '',
+              phone: place.phoneNumber ?? '',
+              category: [...new Set([place.type, place.category, ...(place.types ?? [])].filter(Boolean))].join(' / '),
+              placeId: place.placeId ?? place.cid ?? placeKey,
+            })
+            if (items.length >= resultLimit) break
           }
-          if (!isAddressInRequestedArea(place.address ?? '', normalizedArea)) {
-            stats.areaRejectedCount++
-            continue
-          }
-
-          const host = extractHost(link)
-          if (!host || isNonProductionHost(host) || SKIP_DOMAINS.has(host) || [...SKIP_DOMAINS].some((domain) => host.endsWith(`.${domain}`))) {
-            stats.blockedDomainCount++
-            continue
-          }
-
-          const normalizedUrl = normalizeCandidateUrl(link)
-          if (!normalizedUrl || seenUrls.has(normalizedUrl)) {
-            stats.duplicateCount++
-            continue
-          }
-          seenUrls.add(normalizedUrl)
-          items.push({
-            link,
-            title: place.title ?? '',
-            snippet: place.description ?? '',
-            keyword,
-            area: normalizedArea,
-            source: 'places',
-            address: place.address ?? '',
-            phone: place.phoneNumber ?? '',
-            category: [...new Set([place.type, place.category, ...(place.types ?? [])].filter(Boolean))].join(' / '),
-            placeId: place.placeId ?? place.cid ?? placeKey,
-          })
-          if (items.length >= resultLimit) break
+          const consecutiveEmpty = newPlacesOnPage === 0 ? (zeroNewPages.get(keyword) ?? 0) + 1 : 0
+          zeroNewPages.set(keyword, consecutiveEmpty)
+          if (consecutiveEmpty >= 2) exhaustedQueries.add(keyword)
         }
-
-        // Relevance filtering must not make pagination stop early. Saturation is
-        // based on unseen places returned by Serper, not accepted candidates.
-        const consecutiveEmpty = newPlacesOnPage === 0 ? (zeroNewPages.get(keyword) ?? 0) + 1 : 0
-        zeroNewPages.set(keyword, consecutiveEmpty)
-        // A single empty page can be transient. Stop only after two consecutive
-        // pages with no unseen places for this exact keyword.
-        if (consecutiveEmpty >= 2) exhaustedQueries.add(keyword)
+        nextPage = page
+        await publishProgress()
+        if (items.length < resultLimit && requestDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, requestDelayMs))
+        }
       }
-
-      if (items.length < resultLimit && requestDelayMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, requestDelayMs))
-      }
+      nextPage = page + 1
+      await publishProgress(makeCheckpoint('places', nextPage))
+    }
+    stats.placesCandidateCount = items.length
+    if (placesCompleted) {
+      phase = params.includeOrganic === false || items.length >= resultLimit ? 'complete' : 'organic'
+      nextPage = 1
+      await publishProgress(makeCheckpoint(phase, nextPage))
     }
   }
 
-  stats.candidateCount = items.length
-  stats.exhaustedQueryCount = exhaustedQueries.size
-  stats.pageCapReachedQueryCount = keywords.filter((keyword) => !exhaustedQueries.has(keyword)).length
-  stats.placesCandidateCount = items.length
-
-  // Serper's regular web results can recover official sites that are absent
-  // from a Places listing. They remain only discovery candidates: the later
-  // relevance gate requires on-site address and industry evidence before an
-  // organic result is admitted.
-  if (params.includeOrganic !== false && items.length < resultLimit) {
-    const organicMaxPages = readBoundedInt(process.env.SERPER_ORGANIC_MAX_PAGES, 20, 1, 20)
-    const organicQueryLimit = readBoundedInt(process.env.SERPER_ORGANIC_QUERY_LIMIT, 30, 1, 60)
-    // These are independent plain queries, not AND/OR syntax. The variants
-    // diversify Serper's ranking without changing or subdividing the area.
-    const organicVariants = ['公式', '会社概要', '']
-    const organicQueries = organicVariants
-      .flatMap((variant) => keywords.map((keyword) => ({
-        key: `${keyword}\u0000${variant || 'plain'}`,
-        keyword,
-        query: [keyword, normalizedArea, variant].filter(Boolean).join(' '),
-      })))
-      .slice(0, organicQueryLimit)
-    const organicExhausted = new Set<string>()
-    const organicZeroNewPages = new Map<string, number>()
-    const organicSeenByKeyword = new Map<string, Set<string>>()
-    const seenOrganicHosts = new Set(items.map((item) => extractHost(item.link)).filter(Boolean))
+  if (phase === 'organic' && !searchTimeBudgetReached && items.length < resultLimit) {
     stats.organicMaxPages = organicMaxPages
-
-    organicLoop: for (let page = 1; page <= organicMaxPages && items.length < resultLimit; page++) {
+    let organicCompleted = true
+    organicLoop: for (let page = nextPage; page <= organicMaxPages && items.length < resultLimit; page++) {
       const activeQueries = organicQueries.filter((query) => !organicExhausted.has(query.key))
       if (activeQueries.length === 0) break
-
       for (let offset = 0; offset < activeQueries.length && items.length < resultLimit; offset += concurrency) {
         if (!hasTimeForBatch()) {
           searchTimeBudgetReached = true
+          organicCompleted = false
+          nextPage = page
+          await publishProgress()
           break organicLoop
         }
         const batch = activeQueries.slice(offset, offset + concurrency)
@@ -488,7 +580,6 @@ export async function runSerperSearch(params: {
         })))
         stats.queriesExecuted += batch.length
         stats.organicQueriesExecuted += batch.length
-
         for (const { query, response } of responses) {
           if (response.error) {
             stats.failedQueries++
@@ -496,17 +587,12 @@ export async function runSerperSearch(params: {
             errors.push(response.error)
             continue
           }
-
           const organic = response.organic ?? []
           stats.rawCandidateCount += organic.length
           stats.organicRawCandidateCount += organic.length
-        // Saturation is based on new usable company hosts, not raw result URLs.
-        // Otherwise article pages and alternate URLs keep every query alive for
-        // all 20 pages even when they add no new official-site candidates.
-        let newCandidateHostsOnPage = 0
+          let newCandidateHostsOnPage = 0
           const keywordSeen = organicSeenByKeyword.get(query.key) ?? new Set<string>()
           organicSeenByKeyword.set(query.key, keywordSeen)
-
           for (const result of organic) {
             const normalizedUrl = normalizeCandidateUrl(result.link?.trim() ?? '')
             if (!normalizedUrl) {
@@ -525,15 +611,10 @@ export async function runSerperSearch(params: {
               stats.organicRejectedCount++
               continue
             }
-            if (seenUrls.has(normalizedUrl)) {
+            if (seenUrls.has(normalizedUrl) || seenOrganicHosts.has(host)) {
               stats.duplicateCount++
               continue
             }
-            if (seenOrganicHosts.has(host)) {
-              stats.duplicateCount++
-              continue
-            }
-
             seenUrls.add(normalizedUrl)
             seenOrganicHosts.add(host)
             newCandidateHostsOnPage++
@@ -551,28 +632,31 @@ export async function runSerperSearch(params: {
             })
             if (items.length >= resultLimit) break
           }
-
           const consecutiveEmpty = newCandidateHostsOnPage === 0
             ? (organicZeroNewPages.get(query.key) ?? 0) + 1
             : 0
           organicZeroNewPages.set(query.key, consecutiveEmpty)
           if (consecutiveEmpty >= 2) organicExhausted.add(query.key)
         }
-
+        nextPage = page
+        await publishProgress()
         if (items.length < resultLimit && requestDelayMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, requestDelayMs))
         }
       }
+      nextPage = page + 1
+      await publishProgress(makeCheckpoint('organic', nextPage))
     }
-    stats.organicExhaustedQueryCount = organicExhausted.size
-    stats.organicPageCapReachedQueryCount = organicQueries
-      .filter((query) => !organicExhausted.has(query.key)).length
+    if (organicCompleted) {
+      phase = 'complete'
+      nextPage = 0
+      await publishProgress(makeCheckpoint('complete', nextPage))
+    }
   }
 
   const error = errors.length > 0 ? errors[0] : undefined
-  stats.candidateCount = items.length
+  refreshStats()
   stats.organicCandidateCount = Math.max(0, items.length - stats.placesCandidateCount)
   stats.searchTimeBudgetReached = searchTimeBudgetReached
-  stats.searchElapsedMs = Date.now() - startedAt
   return { items, noWebsitePlaces, stats, errors: errors.slice(0, 100), ...(error && { error }) }
 }

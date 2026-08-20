@@ -209,6 +209,7 @@ export default function HistoryPage() {
           ...(st?.areas && st.areas.length > 1 ? { areas: st.areas } : {}),
           keywords: st?.keywords ?? [],
           maxResults: 0,
+          resumeFromRunId: run.id,
         }),
       })
       const result = await response.json().catch(() => null)
@@ -398,7 +399,7 @@ export default function HistoryPage() {
                             onClick={() => retryRun(run)}
                             className="text-xs px-1.5 py-0.5 rounded border border-gray-300 text-gray-500 hover:text-blue-600 hover:border-blue-300 transition-colors"
                           >
-                            再実行
+                            {run.results?.searchProgress?.resumeAvailable ? '続きから再開' : '再実行'}
                           </button>
                         )}
                       </div>
@@ -481,9 +482,25 @@ export default function HistoryPage() {
                         })()}
                       </div>
                     ) : (
-                      <span className="text-gray-400 text-xs">
-                        {run.status === 'running' ? '収集中...' : '-'}
-                      </span>
+                      <div className="space-y-0.5 text-xs">
+                        {run.rawSearchCount != null && run.rawSearchCount > 0 ? (
+                          <div className="flex items-center gap-1.5 text-violet-600 font-medium">
+                            <ListOrdered className="w-3.5 h-3.5 flex-shrink-0" />
+                            候補 {run.rawSearchCount.toLocaleString()}件
+                          </div>
+                        ) : (
+                          <span className="text-gray-400">
+                            {run.status === 'running' ? '候補探索中...' : '-'}
+                          </span>
+                        )}
+                        {run.results?.searchProgress && (
+                          <div className="text-[11px] text-gray-500">
+                            {run.results.searchProgress.phase === 'places' ? 'ローカル検索' : run.results.searchProgress.phase === 'organic' ? '通常検索' : '候補探索完了'}
+                            {run.results.searchProgress.phase !== 'complete' && ` · 次は${run.results.searchProgress.nextPage}ページ`}
+                            {run.results.searchProgress.resumeAvailable && ' · 再開位置保存済み'}
+                          </div>
+                        )}
+                      </div>
                     )}
                   </td>
 

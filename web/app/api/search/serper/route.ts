@@ -3,7 +3,14 @@ import { z } from 'zod'
 import { runSerperSearch, extractHost } from '@/lib/serper'
 import { runPortalDiscovery, businessDedupeKey, type PortalDiscoveryStats } from '@/lib/portal-discovery'
 import { validateAreaInput } from '@/lib/search-relevance'
-import { getProjectRun, updateRunStatus } from '@/lib/project-manager'
+import {
+  getProjectRun,
+  getRunSearchCheckpoint,
+  updateRunSearchProgress,
+  updateRunStatus,
+} from '@/lib/project-manager'
+import { upsertSearchCandidates } from '@/lib/search-candidates-db'
+import { getErrorMessage } from '@/lib/error-message'
 
 export const maxDuration = 300
 
@@ -14,6 +21,7 @@ const Schema = z.object({
   maxResults: z.number().int().min(0).default(0),
   projectId:  z.string().optional(),
   runId:      z.string().optional(),
+  resumeFromRunId: z.string().optional(),
   includePortals: z.boolean().default(true),
 })
 
@@ -49,11 +57,49 @@ export async function POST(req: NextRequest) {
     // ポータル経由の候補拡大が打ち切られないようにする（精度目標.md 候補母数の拡大）。
     const portalBudgetMs = readBoundedInt(process.env.SERPER_PORTAL_TIME_BUDGET_MS, 180_000, 0, 1_800_000)
 
+    const checkpointSourceRunId = body.resumeFromRunId ?? body.runId
+    const checkpoint = checkpointSourceRunId
+      ? await getRunSearchCheckpoint(checkpointSourceRunId)
+      : undefined
+    const persistenceWarnings: string[] = []
+    const persistedCandidateUrls = new Set<string>()
+    const persistCandidates = async (candidates: Parameters<typeof upsertSearchCandidates>[0]['candidates']) => {
+      if (!body.projectId || !body.runId) return
+      const pending = candidates.filter((candidate) => {
+        const key = candidate.link.trim()
+        return key && !persistedCandidateUrls.has(key)
+      })
+      if (pending.length === 0) return
+      try {
+        await upsertSearchCandidates({ projectId: body.projectId, runId: body.runId, candidates: pending })
+        pending.forEach((candidate) => persistedCandidateUrls.add(candidate.link.trim()))
+      } catch (error) {
+        persistenceWarnings.push(`発見候補の保存に失敗しました: ${getErrorMessage(error)}`)
+      }
+    }
+    let lastProgressWriteAt = 0
     const { items, noWebsitePlaces, stats, errors, error: apiErr } = await runSerperSearch({
       keywords: body.keywords,
       area: areaValidation.normalized,
       maxResults: body.maxResults,
       apiKey,
+      timeBudgetMs,
+      checkpoint,
+      onProgress: body.runId ? async (progress, durableCheckpoint) => {
+        const now = Date.now()
+        if (!durableCheckpoint && now - lastProgressWriteAt < 2_000) return
+        if (durableCheckpoint) await persistCandidates(durableCheckpoint.items)
+        try {
+          await updateRunSearchProgress(
+            body.runId!,
+            { ...progress, resumedFromRunId: checkpoint ? checkpointSourceRunId : undefined },
+            durableCheckpoint,
+          )
+          lastProgressWriteAt = now
+        } catch (error) {
+          persistenceWarnings.push(`検索進捗の保存に失敗しました: ${getErrorMessage(error)}`)
+        }
+      } : undefined,
     })
 
     if (apiErr && items.length === 0) {
@@ -68,7 +114,7 @@ export async function POST(req: NextRequest) {
     let hpNotFoundCount = 0
     const hpNotFoundSaved = 0
     const portalDeadline = Math.max(deadline, Date.now() + portalBudgetMs)
-    if (body.includePortals && Date.now() < portalDeadline - 15_000) {
+    if (!stats.searchTimeBudgetReached && body.includePortals && Date.now() < portalDeadline - 15_000) {
       const existingKeys = new Set(items.map((item) => businessDedupeKey(item.title, item.phone, item.address)))
       const existingHosts = new Set(items.map((item) => extractHost(item.link)).filter(Boolean))
       // Placesに載っているが公式サイトURLが無い事業者も、公式HP再検索と
@@ -101,6 +147,10 @@ export async function POST(req: NextRequest) {
       // だけが items に入り、後段の関連性検証・保存へ進む。
     }
 
+    // Includes candidates resolved from portal listings. Portal/listing URLs
+    // themselves never enter items and therefore never enter this table.
+    await persistCandidates(items)
+
     stats.candidateCount = items.length
 
     // Publish discovery progress before scraping starts. This makes the result
@@ -109,13 +159,17 @@ export async function POST(req: NextRequest) {
       const run = await getProjectRun(body.runId)
       const canceled = run?.status === 'error' && run.error?.includes('キャンセル')
       if (!canceled && run) {
-        await updateRunStatus(
-          body.runId,
-          'running',
-          run.n8nExecutionId,
-          run.itemsWritten,
-          { rawSearchCount: items.length },
-        )
+        try {
+          await updateRunStatus(
+            body.runId,
+            'running',
+            run.n8nExecutionId,
+            run.itemsWritten,
+            { rawSearchCount: items.length },
+          )
+        } catch (error) {
+          persistenceWarnings.push(`候補件数の保存に失敗しました: ${getErrorMessage(error)}`)
+        }
       }
     }
 
@@ -128,9 +182,14 @@ export async function POST(req: NextRequest) {
       hpNotFoundCount,
       hpNotFoundSaved,
       errors,
-      ...(apiErr && { warning: `一部のSerper検索に失敗しました: ${apiErr.status} ${apiErr.text}` }),
+      ...((apiErr || persistenceWarnings.length > 0) && {
+        warning: [
+          ...(apiErr ? [`一部のSerper検索に失敗しました: ${apiErr.status} ${apiErr.text}`] : []),
+          ...new Set(persistenceWarnings),
+        ].join(' / '),
+      }),
     })
   } catch (e) {
-    return NextResponse.json({ success: false, error: String(e) }, { status: 400 })
+    return NextResponse.json({ success: false, error: getErrorMessage(e) }, { status: 400 })
   }
 }

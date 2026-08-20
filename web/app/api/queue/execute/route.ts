@@ -5,6 +5,8 @@ import {
   addRunToProject,
   addBatchRunToProject,
   getProject,
+  getProjectRun,
+  getChildRuns,
   rollupBatchRun,
   updateRunStatus,
 } from '@/lib/project-manager'
@@ -21,6 +23,7 @@ const Schema = z.object({
   areas: z.array(z.string()).optional(),            // multi-area batch mode
   keywords: z.array(z.string()).optional(),
   maxResults: z.number().int().min(0).optional(),  // 0 = unlimited
+  resumeFromRunId: z.string().min(1).optional(),
 })
 
 /**
@@ -61,6 +64,9 @@ export async function POST(req: NextRequest) {
 
     if (isBatch) {
       const areas = execFields.areas!
+      const resumeChildren = execFields.resumeFromRunId
+        ? await getChildRuns(execFields.resumeFromRunId)
+        : []
       const timestamp = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }).slice(0, 16)
 
       // Generate stable child IDs (index-offset to avoid millisecond collisions)
@@ -105,6 +111,7 @@ export async function POST(req: NextRequest) {
           maxResults,
           projectId,
           runId: child.id,
+          resumeFromRunId: resumeChildren.find((previous) => previous.searchTarget.area === child.searchTarget.area)?.id,
         }
 
         const { canStart, queuePosition } = await enqueue(child.id, projectId, childParams)
@@ -112,9 +119,14 @@ export async function POST(req: NextRequest) {
         if (canStart) {
           await markJobActive(child.id)
           try {
-            const result = await triggerWorkflow(childParams)
+            const result = await triggerWorkflow(childParams, {
+              getRegisteredExecutionId: async () => (await getProjectRun(child.id))?.n8nExecutionId,
+            })
             anyChildStarted = true
-            await updateRunStatus(child.id, 'running', result.executionId)
+            const currentChild = await getProjectRun(child.id)
+            if (currentChild?.status === 'pending' || currentChild?.status === 'running') {
+              await updateRunStatus(child.id, 'running', result.executionId)
+            }
             childResults.push({
               id: child.id,
               queued: false,
@@ -171,6 +183,7 @@ export async function POST(req: NextRequest) {
       maxResults,
       projectId,
       runId,
+      resumeFromRunId: execFields.resumeFromRunId,
     }
 
     // Register the exact place-name search so retries reproduce the same area
@@ -201,9 +214,15 @@ export async function POST(req: NextRequest) {
     await markJobActive(runId)
 
     try {
-      const result = await triggerWorkflow(params)
-      // Update run status to running
-      await updateRunStatus(runId, 'running', result.executionId)
+      const result = await triggerWorkflow(params, {
+        getRegisteredExecutionId: async () => (await getProjectRun(runId))?.n8nExecutionId,
+      })
+      // A very short workflow may have already reached its completion callback.
+      // Never overwrite a terminal success/error state with running.
+      const currentRun = await getProjectRun(runId)
+      if (currentRun?.status === 'pending' || currentRun?.status === 'running') {
+        await updateRunStatus(runId, 'running', result.executionId)
+      }
 
       return NextResponse.json({
         success: true,

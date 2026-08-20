@@ -87,6 +87,7 @@ export interface BenchmarkResults {
   organicPageCapReachedQueryCount?: number
   organicMaxPages?: number
   searchTimeBudgetReached?: boolean
+  portalDeadlineReached?: boolean
   searchElapsedMs?: number
   relevanceReasonCounts?: Record<string, number>
   expectedCandidateCount?: number
@@ -97,6 +98,19 @@ export interface BenchmarkResults {
   failedBatchCount?: number
   resultSetComplete?: boolean
   warnings?: string[]
+  searchProgress?: {
+    phase: 'places' | 'organic' | 'complete'
+    nextPage: number
+    maxPages: number
+    candidateCount: number
+    rawCandidateCount: number
+    queriesExecuted: number
+    exhaustedQueryCount: number
+    searchElapsedMs: number
+    resumeAvailable: boolean
+    resumedFromRunId?: string
+    updatedAt: string
+  }
 }
 
 // ─── Project types ────────────────────────────────────────────
@@ -194,6 +208,7 @@ export interface ExecuteParams {
   maxResults?: number
   projectId: string
   runId: string
+  resumeFromRunId?: string
 }
 
 export interface ApiResponse<T> {

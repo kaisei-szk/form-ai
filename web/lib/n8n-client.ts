@@ -1,19 +1,63 @@
 import type { N8nExecution, ExecuteParams } from './types'
 
-const BASE_URL = process.env.N8N_BASE_URL || 'http://localhost:5678'
-const API_KEY = process.env.N8N_API_KEY || ''
-const WORKFLOW_ID = process.env.N8N_WORKFLOW_ID || ''
-const WEBHOOK_PATH = process.env.N8N_WEBHOOK_PATH || 'list-collect'
+function config() {
+  return {
+    baseUrl: process.env.N8N_BASE_URL || 'http://localhost:5678',
+    apiKey: process.env.N8N_API_KEY || '',
+    workflowId: process.env.N8N_WORKFLOW_ID || '',
+    webhookPath: process.env.N8N_WEBHOOK_PATH || 'list-collect',
+  }
+}
+
+function isPlaceholder(value: string): boolean {
+  return !value || /placeholder|your[_-]?|change.?me|xxxx/i.test(value)
+}
+
+function assertTrackingConfigured(): void {
+  const { apiKey, workflowId } = config()
+  if (isPlaceholder(apiKey)) {
+    throw new Error('N8N_API_KEYが未設定のため、n8nの失敗状態を追跡できません')
+  }
+  if (isPlaceholder(workflowId)) {
+    throw new Error('N8N_WORKFLOW_IDが未設定のため、n8nの失敗状態を追跡できません')
+  }
+}
+
+export class N8nApiError extends Error {
+  public readonly status?: number
+
+  constructor(message: string, status?: number) {
+    super(message)
+    this.name = 'N8nApiError'
+    this.status = status
+  }
+}
 
 function headers() {
+  const { apiKey } = config()
   return {
-    'X-N8N-API-KEY': API_KEY,
+    'X-N8N-API-KEY': apiKey,
     'Content-Type': 'application/json',
   }
 }
 
-export async function triggerWorkflow(params: ExecuteParams): Promise<{ executionId?: string }> {
-  const webhookUrl = `${BASE_URL}/webhook/${WEBHOOK_PATH}`
+export function executionErrorMessage(execution: N8nExecution): string {
+  const executionError = execution.data?.resultData?.error
+  const parts = [
+    executionError?.node?.name,
+    executionError?.description,
+    executionError?.message,
+  ].filter((part): part is string => Boolean(part))
+  return [...new Set(parts)].join(': ') || `n8nワークフローが${execution.status}で終了しました`
+}
+
+export async function triggerWorkflow(
+  params: ExecuteParams,
+  options?: { getRegisteredExecutionId?: () => Promise<string | undefined> },
+): Promise<{ executionId: string }> {
+  assertTrackingConfigured()
+  const { baseUrl, webhookPath } = config()
+  const webhookUrl = `${baseUrl}/webhook/${webhookPath}`
   const res = await fetch(webhookUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
@@ -23,48 +67,82 @@ export async function triggerWorkflow(params: ExecuteParams): Promise<{ executio
 
   if (!res.ok) {
     const text = await res.text()
-    throw new Error(`Webhook failed: ${res.status} ${text}`)
+    throw new N8nApiError(`Webhook failed: ${res.status} ${text}`, res.status)
   }
 
   const data = await res.json().catch(() => ({}))
   const responseExecutionId = data.executionId || data.id
-  if (responseExecutionId) return { executionId: String(responseExecutionId) }
+  if (responseExecutionId) {
+    const executionId = String(responseExecutionId)
+    const execution = await getExecution(executionId)
+    if (execution.status === 'error' || execution.status === 'canceled') {
+      throw new N8nApiError(executionErrorMessage(execution))
+    }
+    return { executionId }
+  }
 
   // WebhookのonReceived応答には通常executionIdが含まれないため、runIdを
   // n8n実行データと照合してIDを補完する。これにより途中エラーも追跡できる。
-  for (const delayMs of [0, 250, 750, 1_500]) {
+  let lookupError: unknown
+  for (const delayMs of [0, 250, 750, 1_500, 2_500]) {
     if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
-    const execution = await findExecutionByRunId(params.runId, true).catch(() => undefined)
-    if (execution) return { executionId: execution.id }
+    try {
+      // The workflow registers $execution.id through the /started callback
+      // before beginning the expensive search. This DB value is authoritative:
+      // n8n does not always expose in-progress node data through its executions
+      // API, so runId-based history matching alone can produce a false failure.
+      const registeredExecutionId = await options?.getRegisteredExecutionId?.()
+      if (registeredExecutionId) return { executionId: registeredExecutionId }
+
+      const execution = await findExecutionByRunId(params.runId, true)
+      if (!execution) continue
+      if (execution.status === 'error' || execution.status === 'canceled') {
+        throw new N8nApiError(executionErrorMessage(execution))
+      }
+      return { executionId: execution.id }
+    } catch (error) {
+      if (error instanceof N8nApiError && error.status === undefined) throw error
+      lookupError = error
+    }
   }
-  return {}
+  const registeredExecutionId = await options?.getRegisteredExecutionId?.().catch((error) => {
+    lookupError = error
+    return undefined
+  })
+  if (registeredExecutionId) return { executionId: registeredExecutionId }
+  const detail = lookupError instanceof Error ? `: ${lookupError.message}` : ''
+  throw new N8nApiError(`n8n実行IDを取得できず、失敗状態を追跡できません${detail}`)
 }
 
 export async function getExecution(executionId: string): Promise<N8nExecution> {
-  const res = await fetch(`${BASE_URL}/api/v1/executions/${executionId}?includeData=true`, {
+  assertTrackingConfigured()
+  const { baseUrl } = config()
+  const res = await fetch(`${baseUrl}/api/v1/executions/${executionId}?includeData=true`, {
     headers: headers(),
     cache: 'no-store',
     signal: AbortSignal.timeout(10000),
   })
 
-  if (!res.ok) throw new Error(`Failed to get execution: ${res.status}`)
+  if (!res.ok) throw new N8nApiError(`Failed to get execution: ${res.status}`, res.status)
   return res.json()
 }
 
 export async function listExecutions(limit = 30): Promise<{ data: N8nExecution[]; nextCursor?: string }> {
+  assertTrackingConfigured()
+  const { baseUrl, workflowId } = config()
   const params = new URLSearchParams({
     limit: String(limit),
     includeData: 'true',
-    ...(WORKFLOW_ID ? { workflowId: WORKFLOW_ID } : {}),
+    workflowId,
   })
 
-  const res = await fetch(`${BASE_URL}/api/v1/executions?${params}`, {
+  const res = await fetch(`${baseUrl}/api/v1/executions?${params}`, {
     headers: headers(),
     cache: 'no-store',
     signal: AbortSignal.timeout(10000),
   })
 
-  if (!res.ok) throw new Error(`Failed to list executions: ${res.status}`)
+  if (!res.ok) throw new N8nApiError(`Failed to list executions: ${res.status}`, res.status)
   return res.json()
 }
 
@@ -115,7 +193,8 @@ function executionRunId(execution: N8nExecution): string | undefined {
 }
 
 export async function findExecutionByRunId(runId: string, forceRefresh = false): Promise<N8nExecution | undefined> {
-  if (!runId || !API_KEY) return undefined
+  if (!runId) return undefined
+  assertTrackingConfigured()
   const data = forceRefresh
     ? (await listExecutions(50)).data
     : await recentExecutions()
@@ -129,7 +208,8 @@ export async function checkN8nHealth(): Promise<boolean> {
   const now = Date.now()
   if (_healthCache && now < _healthCache.expiresAt) return _healthCache.result
   try {
-    const res = await fetch(`${BASE_URL}/healthz`, { signal: AbortSignal.timeout(5000) })
+    const { baseUrl } = config()
+    const res = await fetch(`${baseUrl}/healthz`, { signal: AbortSignal.timeout(5000) })
     const result = res.ok
     _healthCache = { result, expiresAt: now + 30_000 }
     return result

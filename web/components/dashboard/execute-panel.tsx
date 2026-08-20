@@ -34,6 +34,14 @@ interface BatchProgress {
   error: number
 }
 
+interface SearchProgressView {
+  phase: 'places' | 'organic' | 'complete'
+  nextPage: number
+  maxPages: number
+  candidateCount: number
+  resumeAvailable: boolean
+}
+
 
 
 function generateRunId() {
@@ -84,6 +92,8 @@ export default function ExecutePanel() {
   const [showPresets, setShowPresets] = useState(false)
   const [itemsWritten, setItemsWritten] = useState(0)
   const [liveCount, setLiveCount] = useState(0)
+  const [candidateCount, setCandidateCount] = useState(0)
+  const [searchProgress, setSearchProgress] = useState<SearchProgressView | null>(null)
   const [queuePosition, setQueuePosition] = useState(0)
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
@@ -106,6 +116,7 @@ export default function ExecutePanel() {
   const firstItemTimeRef = useRef<number | null>(null)
   const prevLiveCountRef = useRef<number>(0)
   const observedRunStatesRef = useRef<Record<string, 'queued' | 'running' | 'success' | 'error'>>({})
+  const observedCandidateCountsRef = useRef<Record<string, number>>({})
   const canceledRunIdsRef = useRef<Set<string>>(new Set())
 
   const actualIndustry = industry
@@ -281,9 +292,21 @@ export default function ExecutePanel() {
             throw new Error(data?.error || `状態取得に失敗しました (${res.status})`)
           }
 
-          consecutivePollErrors = 0
           const run = data.data
+          if (typeof run.syncError === 'string' && run.syncError) {
+            throw new Error(run.syncError)
+          }
+          consecutivePollErrors = 0
           const written = typeof run.itemsWritten === 'number' ? run.itemsWritten : 0
+          const discovered = typeof run.rawSearchCount === 'number' ? run.rawSearchCount : 0
+          observedCandidateCountsRef.current[runId] = Math.max(
+            observedCandidateCountsRef.current[runId] ?? 0,
+            discovered,
+          )
+          setCandidateCount(Object.values(observedCandidateCountsRef.current).reduce((sum, count) => sum + count, 0))
+          if (run.results?.searchProgress) {
+            setSearchProgress(run.results.searchProgress)
+          }
           if (written > 0) {
             if (prevLiveCountRef.current === 0) firstItemTimeRef.current = Date.now()
             prevLiveCountRef.current = Math.max(prevLiveCountRef.current, written)
@@ -314,7 +337,13 @@ export default function ExecutePanel() {
           const activeStates = Object.values(observedRunStatesRef.current)
           if (activeStates.includes('running')) {
             setStatus('running')
-            setLog('収集処理を実行中です')
+            const phase = run.results?.searchProgress?.phase
+            setLog(
+              phase === 'places' ? 'ローカル検索から候補を探索中です'
+                : phase === 'organic' ? '通常検索から公式HP候補を探索中です'
+                  : phase === 'complete' ? '候補探索が完了し、HP・フォームを確認中です'
+                    : '収集処理を実行中です',
+            )
           } else if (activeStates.includes('queued')) {
             setStatus('queued')
             setLog(queuePos > 0 ? `キュー待機中（${queuePos}番目）` : '実行開始を待っています')
@@ -344,10 +373,13 @@ export default function ExecutePanel() {
     setLog('実行リクエストを送信中です')
     setItemsWritten(0)
     setLiveCount(0)
+    setCandidateCount(0)
+    setSearchProgress(null)
     setQueuePosition(0)
     setBatchProgress(null)
     setCurrentRunIds([])
     observedRunStatesRef.current = {}
+    observedCandidateCountsRef.current = {}
     canceledRunIdsRef.current = new Set()
     firstItemTimeRef.current = null
     prevLiveCountRef.current = 0
@@ -511,8 +543,11 @@ export default function ExecutePanel() {
       setLog('実行をキャンセルしました')
       setBatchProgress(null)
       setLiveCount(0)
+      setCandidateCount(0)
+      setSearchProgress(null)
       setQueuePosition(0)
       observedRunStatesRef.current = {}
+      observedCandidateCountsRef.current = {}
     }
   }
 
@@ -908,6 +943,28 @@ export default function ExecutePanel() {
                 style={{ width: `${(batchProgress.done / batchProgress.total) * 100}%` }}
               />
             </div>
+          </div>
+        )}
+
+        {/* Search discovery progress. This is persisted page-by-page, independently
+            from the number of final rows already written. */}
+        {status === 'running' && candidateCount > 0 && (
+          <div className="flex items-center justify-between gap-3 bg-violet-50 border border-violet-200 rounded px-3 py-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <Sparkles className="w-3.5 h-3.5 text-violet-500 flex-shrink-0 animate-pulse" />
+              <span className="text-violet-700 text-xs font-medium">
+                候補 {candidateCount.toLocaleString()}件 発見
+              </span>
+              {searchProgress && (
+                <span className="text-violet-500 text-xs truncate">
+                  · {searchProgress.phase === 'places' ? 'ローカル検索' : searchProgress.phase === 'organic' ? '通常検索' : '候補探索完了'}
+                  {searchProgress.phase !== 'complete' && ` ${Math.min(searchProgress.nextPage, searchProgress.maxPages)}/${searchProgress.maxPages}ページ`}
+                </span>
+              )}
+            </div>
+            {searchProgress?.resumeAvailable && (
+              <span className="text-[11px] text-violet-600 flex-shrink-0">再開位置を保存済み</span>
+            )}
           </div>
         )}
 

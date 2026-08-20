@@ -6,6 +6,7 @@ import {
   ArrowLeft, Download, Search, RefreshCw, X,
   CheckCircle, XCircle, Clock, Play, FolderOpen, Copy, Check,
   ChevronUp, ChevronDown, ChevronsUpDown, Sheet, ExternalLink,
+  ListOrdered,
 } from 'lucide-react'
 import type { CompanyRow, Project, ProjectRun } from '@/lib/types'
 
@@ -60,6 +61,15 @@ interface ProjectDetail extends Project {
   formFoundCount?: number
 }
 
+interface SearchCandidateView {
+  id: string
+  name: string
+  url: string
+  source: 'places' | 'organic' | 'portal'
+  keyword: string
+  runId: string
+}
+
 // ── localStorage helpers for filter persistence ────────────────────
 function loadSavedFilters(projectId: string): Partial<FilterState & { runId: string; sortBy: string; sortDir: 'ASC' | 'DESC' }> {
   try {
@@ -95,6 +105,16 @@ export default function ProjectResultsPage() {
   const [error, setError] = useState('')
   const [page, setPage] = useState(1)
   const [exporting, setExporting] = useState(false)
+  const [progressExpanded, setProgressExpanded] = useState(false)
+  const [filtersExpanded, setFiltersExpanded] = useState(false)
+  const [candidateOpen, setCandidateOpen] = useState(false)
+  const [candidateRows, setCandidateRows] = useState<SearchCandidateView[]>([])
+  const [candidateTotal, setCandidateTotal] = useState(0)
+  const [candidatePage, setCandidatePage] = useState(1)
+  const [candidateSearch, setCandidateSearch] = useState('')
+  const [candidateLoading, setCandidateLoading] = useState(false)
+  const [candidateExporting, setCandidateExporting] = useState(false)
+  const [candidateError, setCandidateError] = useState('')
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [selectAllPages, setSelectAllPages] = useState(false)
   const [batchUpdating, setBatchUpdating] = useState(false)
@@ -398,6 +418,80 @@ export default function ProjectResultsPage() {
     }
   }
 
+  const candidateScopeParams = useCallback(() => {
+    const params = new URLSearchParams({ projectId })
+    if (selectedRunId) {
+      const run = project?.runs.find((item) => item.id === selectedRunId)
+      if (run?.childRunIds?.length) {
+        params.set('runIds', [selectedRunId, ...run.childRunIds].join(','))
+      } else {
+        params.set('runId', selectedRunId)
+      }
+    }
+    return params
+  }, [project, projectId, selectedRunId])
+
+  const fetchCandidates = useCallback(async (nextPage: number, searchValue: string) => {
+    setCandidateLoading(true)
+    setCandidateError('')
+    try {
+      const params = candidateScopeParams()
+      params.set('page', String(nextPage))
+      params.set('limit', '100')
+      if (searchValue.trim()) params.set('search', searchValue.trim())
+      const response = await fetch(`/api/search-candidates?${params}`, { cache: 'no-store' })
+      const data = await response.json().catch(() => null)
+      if (!response.ok || !data?.success) throw new Error(data?.error || '発見候補の取得に失敗しました')
+      if (data.setupRequired) {
+        throw new Error('発見候補テーブルのセットアップが必要です')
+      }
+      setCandidateRows(Array.isArray(data.data) ? data.data : [])
+      setCandidateTotal(typeof data.total === 'number' ? data.total : 0)
+      setCandidatePage(nextPage)
+    } catch (error) {
+      setCandidateRows([])
+      setCandidateTotal(0)
+      setCandidateError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setCandidateLoading(false)
+    }
+  }, [candidateScopeParams])
+
+  useEffect(() => {
+    if (!candidateOpen) return
+    const timer = window.setTimeout(() => {
+      void fetchCandidates(1, candidateSearch)
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [candidateOpen, candidateSearch, fetchCandidates])
+
+  const handleCandidateExport = async () => {
+    setCandidateExporting(true)
+    setCandidateError('')
+    try {
+      const params = candidateScopeParams()
+      if (candidateSearch.trim()) params.set('search', candidateSearch.trim())
+      const response = await fetch(`/api/search-candidates/export?${params}`)
+      if (!response.ok) {
+        const data = await response.json().catch(() => null)
+        throw new Error(data?.error || '発見候補CSVの出力に失敗しました')
+      }
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      const disposition = response.headers.get('Content-Disposition') ?? ''
+      const filename = disposition.match(/filename\*?=(?:UTF-8'')?([^;\s]+)/)?.[1]
+      link.download = filename ? decodeURIComponent(filename) : `発見候補_${new Date().toISOString().slice(0, 10)}.csv`
+      link.click()
+      URL.revokeObjectURL(url)
+    } catch (error) {
+      setCandidateError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setCandidateExporting(false)
+    }
+  }
+
   const clearFilters = () => {
     setFilters({ industry: '', area: '', status: '', formType: '', hasForm: '', hasPhone: '', hasEmail: '', search: '' })
     if (projectId) {
@@ -445,6 +539,7 @@ export default function ProjectResultsPage() {
         area: st.area,
         keywords: st.keywords,
         maxResults: 0,
+        resumeFromRunId: run.id,
       }
       if (st.areas && st.areas.length > 1) body.areas = st.areas
       const res = await fetch('/api/queue/execute', {
@@ -627,6 +722,17 @@ export default function ProjectResultsPage() {
             <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
             更新
           </button>
+          <button
+            onClick={() => {
+              setCandidateSearch('')
+              setCandidatePage(1)
+              setCandidateOpen(true)
+            }}
+            className="flex items-center gap-1 text-xs text-violet-700 hover:text-violet-900 border border-violet-300 hover:border-violet-400 rounded px-2 py-1.5 transition-colors bg-violet-50"
+          >
+            <ListOrdered className="w-3 h-3" />
+            発見候補
+          </button>
           {/* Google Sheets integration */}
           {!googleAuthed ? (
             <a
@@ -752,7 +858,7 @@ export default function ProjectResultsPage() {
                   onClick={() => handleRetryRun(run)}
                   disabled={!!retryingRunId}
                   className="ml-0.5 p-1 text-gray-400 hover:text-blue-500 transition-colors disabled:opacity-50"
-                  title="再実行"
+                  title={run.results?.searchProgress?.resumeAvailable ? '続きから再開' : '再実行'}
                 >
                   {retryingRunId === run.id
                     ? <RefreshCw className="w-3 h-3 animate-spin" />
@@ -780,7 +886,12 @@ export default function ProjectResultsPage() {
 
       {progressRun && (
         <div className="bg-white rounded border border-gray-200 p-3 shadow-sm">
-          <div className="flex items-center justify-between gap-3 mb-2">
+          <button
+            type="button"
+            onClick={() => setProgressExpanded((expanded) => !expanded)}
+            aria-expanded={progressExpanded}
+            className="w-full flex items-center justify-between gap-3 text-left"
+          >
             <div className="flex items-center gap-2">
               {(progressRun.status === 'running' || progressRun.status === 'pending') && (
                 <RefreshCw className="w-3.5 h-3.5 text-blue-500 animate-spin" />
@@ -802,28 +913,51 @@ export default function ProjectResultsPage() {
                 全候補の処理を確認済み
               </span>
             )}
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-            <ProgressMetric label="発見候補" value={expectedCandidateCount} />
-            <ProgressMetric label="公式HP保存済み" value={progressRun.itemsWritten ?? 0} tone="green" />
-            <ProgressMetric label="処理済み" value={processedCandidateCount} />
-            <ProgressMetric
-              label="未処理"
-              value={pendingCandidateCount}
-              tone={pendingCandidateCount && pendingCandidateCount > 0 ? 'amber' : undefined}
-            />
-          </div>
-          {progressRun.results?.resultSetComplete === false && (
-            <p className="mt-2 text-xs text-amber-700">
-              取得済みの公式HPは表示していますが、未処理候補が残っているため完全終了にはしていません。
-            </p>
+            {progressExpanded ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
+          </button>
+          {progressExpanded && (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3">
+                <ProgressMetric
+                  label="発見候補"
+                  value={expectedCandidateCount}
+                  onClick={() => {
+                    setCandidateSearch('')
+                    setCandidatePage(1)
+                    setCandidateOpen(true)
+                  }}
+                />
+                <ProgressMetric label="公式HP保存済み" value={progressRun.itemsWritten ?? 0} tone="green" />
+                <ProgressMetric label="処理済み" value={processedCandidateCount} />
+                <ProgressMetric
+                  label="未処理"
+                  value={pendingCandidateCount}
+                  tone={pendingCandidateCount && pendingCandidateCount > 0 ? 'amber' : undefined}
+                />
+              </div>
+              {progressRun.results?.resultSetComplete === false && (
+                <p className="mt-2 text-xs text-amber-700">
+                  取得済みの公式HPは表示していますが、未処理候補が残っているため完全終了にはしていません。
+                </p>
+              )}
+            </>
           )}
         </div>
       )}
 
       {/* Filters */}
       <div className="bg-white rounded border border-gray-200 p-3 shadow-sm">
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+        <button
+          type="button"
+          onClick={() => setFiltersExpanded((expanded) => !expanded)}
+          aria-expanded={filtersExpanded}
+          className="w-full flex items-center justify-between gap-3 text-left"
+        >
+          <span className="text-xs font-medium text-gray-700">ステータス・絞り込み</span>
+          {filtersExpanded ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
+        </button>
+        {filtersExpanded && (
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mt-3">
           <div className="md:col-span-1 relative">
             <Search className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-gray-400" />
             <input
@@ -936,7 +1070,8 @@ export default function ProjectResultsPage() {
               </button>
             )}
           </div>
-        </div>
+          </div>
+        )}
       </div>
 
       {/* Count + batch actions */}
@@ -1289,6 +1424,128 @@ export default function ProjectResultsPage() {
           </div>
         )}
       </div>
+
+      {candidateOpen && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onMouseDown={() => setCandidateOpen(false)}>
+          <section
+            className="h-full w-full max-w-3xl bg-white shadow-2xl flex flex-col"
+            onMouseDown={(event) => event.stopPropagation()}
+            aria-label="発見候補一覧"
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-gray-200 px-5 py-4">
+              <div>
+                <h2 className="text-base font-semibold text-gray-900">発見候補</h2>
+                <p className="text-xs text-gray-500 mt-1">
+                  検索段階で見つかったサイトです。通常の結果・CSV・スプレッドシートには含まれません。
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCandidateOpen(false)}
+                className="p-1 text-gray-400 hover:text-gray-700 rounded"
+                aria-label="閉じる"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2 border-b border-gray-100 px-5 py-3">
+              <div className="relative flex-1">
+                <Search className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-gray-400" />
+                <input
+                  value={candidateSearch}
+                  onChange={(event) => setCandidateSearch(event.target.value)}
+                  placeholder="候補サイト名・URLを検索"
+                  className="w-full border border-gray-300 rounded pl-8 pr-3 py-2 text-sm focus:outline-none focus:border-violet-500"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={handleCandidateExport}
+                disabled={candidateExporting || candidateLoading || candidateTotal === 0}
+                className="flex items-center gap-1.5 rounded bg-violet-600 hover:bg-violet-700 disabled:bg-gray-300 text-white text-xs px-3 py-2 transition-colors"
+              >
+                {candidateExporting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                発見候補CSV出力
+              </button>
+            </div>
+
+            <div className="px-5 py-2 text-xs text-gray-500 border-b border-gray-100">
+              {candidateLoading ? '読み込み中...' : `${candidateTotal.toLocaleString()}件`}
+            </div>
+
+            {candidateError && (
+              <div className="mx-5 mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                {candidateError}
+              </div>
+            )}
+
+            <div className="flex-1 overflow-auto">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-gray-50 border-b border-gray-200">
+                  <tr>
+                    <th className="text-left px-5 py-3 text-xs font-medium text-gray-500 w-2/5">候補サイト名</th>
+                    <th className="text-left px-5 py-3 text-xs font-medium text-gray-500">URL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {candidateLoading && candidateRows.length === 0 && (
+                    <tr><td colSpan={2} className="py-12 text-center text-gray-400"><RefreshCw className="w-5 h-5 animate-spin mx-auto" /></td></tr>
+                  )}
+                  {!candidateLoading && candidateRows.length === 0 && !candidateError && (
+                    <tr><td colSpan={2} className="py-12 text-center text-gray-400 text-sm">発見候補がありません</td></tr>
+                  )}
+                  {candidateRows.map((candidate) => (
+                    <tr key={candidate.id} className="border-b border-gray-100 hover:bg-gray-50">
+                      <td className="px-5 py-3 text-gray-800 align-top">
+                        <div className="font-medium break-words">{candidate.name || '-'}</div>
+                        <div className="text-[11px] text-gray-400 mt-1">
+                          {candidate.source === 'places' ? 'ローカル検索' : candidate.source === 'portal' ? 'ポータル経由' : '通常検索'}
+                        </div>
+                      </td>
+                      <td className="px-5 py-3 align-top">
+                        <div className="flex items-start gap-1 group">
+                          <a
+                            href={candidate.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-blue-600 hover:text-blue-800 break-all text-xs"
+                          >
+                            {candidate.url}
+                          </a>
+                          <CopyButton text={candidate.url} />
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {candidateTotal > 100 && (
+              <div className="border-t border-gray-200 px-5 py-3 flex items-center justify-between bg-gray-50">
+                <span className="text-xs text-gray-500">
+                  {(candidatePage - 1) * 100 + 1}–{Math.min(candidatePage * 100, candidateTotal)} / {candidateTotal}件
+                </span>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void fetchCandidates(candidatePage - 1, candidateSearch)}
+                    disabled={candidatePage <= 1 || candidateLoading}
+                    className="text-xs border border-gray-300 rounded px-3 py-1 disabled:opacity-40"
+                  >前へ</button>
+                  <button
+                    type="button"
+                    onClick={() => void fetchCandidates(candidatePage + 1, candidateSearch)}
+                    disabled={candidatePage * 100 >= candidateTotal || candidateLoading}
+                    className="text-xs border border-gray-300 rounded px-3 py-1 disabled:opacity-40"
+                  >次へ</button>
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
     </div>
   )
 }
@@ -1453,23 +1710,37 @@ function ProgressMetric({
   label,
   value,
   tone,
+  onClick,
 }: {
   label: string
   value: number | null | undefined
   tone?: 'green' | 'amber'
+  onClick?: () => void
 }) {
   const color = tone === 'green'
     ? 'text-green-700'
     : tone === 'amber'
       ? 'text-amber-700'
       : 'text-gray-800'
-  return (
-    <div className="rounded border border-gray-100 bg-gray-50 px-3 py-2">
+  const content = (
+    <>
       <div className="text-[11px] text-gray-500">{label}</div>
       <div className={`text-base font-semibold tabular-nums ${color}`}>
         {typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : '—'}
       </div>
-    </div>
+      {onClick && <div className="text-[10px] text-violet-600 mt-0.5">一覧を見る</div>}
+    </>
+  )
+  return onClick ? (
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded border border-violet-200 bg-violet-50 px-3 py-2 text-left hover:border-violet-400 hover:bg-violet-100 transition-colors"
+    >
+      {content}
+    </button>
+  ) : (
+    <div className="rounded border border-gray-100 bg-gray-50 px-3 py-2">{content}</div>
   )
 }
 

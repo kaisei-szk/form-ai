@@ -16,6 +16,7 @@ const Schema = z.object({
     maxResults: z.number().optional(),
     projectId: z.string(),
     runId: z.string(),
+    resumeFromRunId: z.string().optional(),
   }),
 })
 
@@ -36,8 +37,13 @@ export async function POST(req: NextRequest) {
     }
 
     try {
-      const result = await triggerWorkflow(execParams)
-      await updateRunStatus(runId, 'running', result.executionId)
+      const result = await triggerWorkflow(execParams, {
+        getRegisteredExecutionId: async () => (await getProjectRun(runId))?.n8nExecutionId,
+      })
+      const currentRun = await getProjectRun(runId)
+      if (currentRun?.status === 'pending' || currentRun?.status === 'running') {
+        await updateRunStatus(runId, 'running', result.executionId)
+      }
       const run = await getProjectRun(runId)
       if (run?.parentRunId) await updateRunStatus(run.parentRunId, 'running')
       return NextResponse.json({ success: true, executionId: result.executionId })

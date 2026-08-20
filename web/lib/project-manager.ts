@@ -1,5 +1,6 @@
 import getSql from './db'
 import type { Project, ProjectRun, SearchTarget } from './types'
+import type { SerperSearchCheckpoint, SerperSearchProgress } from './serper'
 
 // ── helper: DB row → typed objects ────────────────────────────────
 
@@ -15,6 +16,9 @@ function rowToProject(r: Record<string, unknown>): Project {
 }
 
 function rowToRun(r: Record<string, unknown>): ProjectRun {
+  const storedResults = r.results as (ProjectRun['results'] & { searchCheckpoint?: unknown }) | undefined
+  const publicResults = storedResults ? { ...storedResults } : undefined
+  if (publicResults && 'searchCheckpoint' in publicResults) delete publicResults.searchCheckpoint
   return {
     id:              r.id as string,
     projectId:       r.project_id as string,
@@ -32,9 +36,45 @@ function rowToRun(r: Record<string, unknown>): ProjectRun {
     tokensInput:     r.tokens_input as number | undefined,
     tokensOutput:    r.tokens_output as number | undefined,
     rawSearchCount:  r.raw_search_count as number | undefined,
-    results:         r.results as ProjectRun['results'] | undefined,
+    results:         publicResults,
     error:           r.error as string | undefined,
   }
+}
+
+export async function getRunSearchCheckpoint(runId: string): Promise<SerperSearchCheckpoint | undefined> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
+  const { data, error } = await supabase.from('project_runs').select('results').eq('id', runId).limit(1)
+  if (error) throw error
+  return data?.[0]?.results?.searchCheckpoint as SerperSearchCheckpoint | undefined
+}
+
+export async function updateRunSearchProgress(
+  runId: string,
+  progress: SerperSearchProgress & { resumedFromRunId?: string },
+  checkpoint?: SerperSearchCheckpoint,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSql() as any
+  const { data, error: readError } = await supabase
+    .from('project_runs')
+    .select('status, error, results')
+    .eq('id', runId)
+    .limit(1)
+  if (readError) throw readError
+  const row = data?.[0]
+  if (!row || (row.status === 'error' && String(row.error ?? '').includes('キャンセル'))) return
+  const existingResults = row.results && typeof row.results === 'object' ? row.results : {}
+  const results = {
+    ...existingResults,
+    searchProgress: progress,
+    ...(checkpoint ? { searchCheckpoint: checkpoint } : {}),
+  }
+  const { error } = await supabase
+    .from('project_runs')
+    .update({ raw_search_count: progress.candidateCount, results })
+    .eq('id', runId)
+  if (error) throw error
 }
 
 // ─── Projects ──────────────────────────────────────────────────────
@@ -373,6 +413,7 @@ export interface RunStatusUpdate {
   completedAt?: string
   rawSearchCount?: number
   results?: import('./types').BenchmarkResults
+  searchCheckpoint?: SerperSearchCheckpoint
   error?: string
 }
 
@@ -431,7 +472,9 @@ export async function updateRunStatus(
   if (extra?.estimatedCostUsd !== undefined) fields.estimated_cost_usd  = extra.estimatedCostUsd
   if (extra?.completedAt      !== undefined) fields.completed_at        = extra.completedAt
   if (extra?.rawSearchCount   !== undefined) fields.raw_search_count    = extra.rawSearchCount
-  if (extra?.results          !== undefined) fields.results             = extra.results
+  if (extra?.results          !== undefined) fields.results             = extra.searchCheckpoint
+    ? { ...extra.results, searchCheckpoint: extra.searchCheckpoint }
+    : extra.results
   if (extra?.error            !== undefined) fields.error               = extra.error
 
   const { error } = await supabase.from('project_runs').update(fields).eq('id', runId)
