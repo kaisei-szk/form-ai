@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isNonOfficialOrganicTitle, runSerperSearch, type SerperSearchCheckpoint } from './serper.ts'
+import {
+  getAreaSearchPartitions,
+  isExplicitNotFoundCandidate,
+  isNonOfficialOrganicTitle,
+  runSerperSearch,
+  type SerperSearchCheckpoint,
+} from './serper.ts'
 
 type MockPlace = {
   placeId: string
@@ -26,6 +32,47 @@ test('comparison article titles are not official HP candidates', () => {
   assert.equal(isNonOfficialOrganicTitle('株式会社サンプル｜SNS運用代行'), false)
 })
 
+test('explicit 404 results are rejected before candidate fetching', () => {
+  assert.equal(isExplicitNotFoundCandidate('https://example.com/page404', '会社案内'), true)
+  assert.equal(isExplicitNotFoundCandidate('https://example.com/404.html', '404 Not Found'), true)
+  assert.equal(isExplicitNotFoundCandidate('https://example.com/', '404 Not Found - Example'), true)
+  assert.equal(isExplicitNotFoundCandidate('https://404studio.example.com/', '株式会社404 Studio'), false)
+})
+
+test('Shibuya is split into dense neighbourhood search pools', () => {
+  const partitions = getAreaSearchPartitions('渋谷区')
+  assert.ok(partitions.includes('恵比寿'))
+  assert.ok(partitions.includes('代官山'))
+  assert.ok(partitions.includes('笹塚'))
+  assert.equal(new Set(partitions).size, partitions.length)
+})
+
+test('a neighbourhood partition produces an independent Places query', async () => {
+  const originalFetch = globalThis.fetch
+  const queries: string[] = []
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { q: string }
+    queries.push(body.q)
+    return new Response(JSON.stringify({ places: [] }), { status: 200 })
+  }
+
+  try {
+    await runSerperSearch({
+      keywords: ['C'],
+      area: '渋谷区',
+      areaPartitions: ['恵比寿'],
+      maxPages: 1,
+      includeOrganic: false,
+      requestDelayMs: 0,
+      apiKey: 'test-key',
+    })
+    assert.ok(queries.includes('C 渋谷区'))
+    assert.ok(queries.includes('C 渋谷区 恵比寿'))
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
 test('another keyword does not cause premature saturation through global deduplication', async () => {
   const pages: Record<string, MockPlace[]> = {
     'A:1': [place('X')],
@@ -47,6 +94,7 @@ test('another keyword does not cause premature saturation through global dedupli
     const result = await runSerperSearch({
       keywords: ['A', 'B'],
       area: '渋谷区',
+      areaPartitions: [],
       maxPages: 4,
       includeOrganic: false,
       requestDelayMs: 0,
@@ -73,6 +121,7 @@ test('industry synonym keywords widen places discovery', async () => {
     const result = await runSerperSearch({
       keywords: ['美容室'],
       area: '渋谷区',
+      areaPartitions: [],
       maxPages: 1,
       includeOrganic: false,
       requestDelayMs: 0,
@@ -99,6 +148,7 @@ test('one empty page is retried before a query is considered exhausted', async (
     const result = await runSerperSearch({
       keywords: ['C'],
       area: '渋谷区',
+      areaPartitions: [],
       maxPages: 3,
       includeOrganic: false,
       requestDelayMs: 0,
@@ -140,6 +190,7 @@ test('organic query stops after two pages add no new company hosts', async () =>
     const result = await runSerperSearch({
       keywords: ['SNS運用会社'],
       area: '渋谷区',
+      areaPartitions: [],
       maxPages: 1,
       requestDelayMs: 0,
       apiKey: 'test-key',
@@ -186,6 +237,7 @@ test('organic checkpoints are safe to persist in PostgreSQL jsonb', async () => 
     await runSerperSearch({
       keywords: ['SNS運用会社'],
       area: '渋谷区',
+      areaPartitions: [],
       maxPages: 1,
       requestDelayMs: 0,
       apiKey: 'test-key',
@@ -229,6 +281,7 @@ test('completed page checkpoint resumes from the next page after time budget', a
     const first = await runSerperSearch({
       keywords: ['C'],
       area: '渋谷区',
+      areaPartitions: [],
       maxPages: 2,
       includeOrganic: false,
       requestDelayMs: 0,
@@ -252,6 +305,7 @@ test('completed page checkpoint resumes from the next page after time budget', a
     const resumed = await runSerperSearch({
       keywords: ['C'],
       area: '渋谷区',
+      areaPartitions: [],
       maxPages: 2,
       includeOrganic: false,
       requestDelayMs: 0,

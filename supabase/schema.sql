@@ -76,10 +76,15 @@ create table if not exists public.search_candidates (
   normalized_url text not null,
   source         text not null default '',
   keyword        text not null default '',
+  industry       text not null default '',
   area           text not null default '',
   address        text not null default '',
   phone          text not null default '',
   category       text not null default '',
+  verification_status text not null default 'pending',
+  verification_reasons jsonb not null default '[]'::jsonb,
+  verification_attempts integer not null default 0,
+  verified_at    text,
   discovered_at  text not null,
   unique(run_id, normalized_url)
 );
@@ -87,6 +92,38 @@ create table if not exists public.search_candidates (
 create index if not exists idx_search_candidates_project_id on public.search_candidates(project_id);
 create index if not exists idx_search_candidates_run_id on public.search_candidates(run_id);
 create index if not exists idx_search_candidates_normalized_url on public.search_candidates(normalized_url);
+create index if not exists idx_search_candidates_verification_status on public.search_candidates(verification_status);
+
+-- Portal-listed businesses whose official HP has not been resolved yet.
+create table if not exists public.discovered_businesses (
+  id                 text primary key,
+  project_id         text not null references public.projects(id) on delete cascade,
+  run_id             text not null references public.project_runs(id) on delete cascade,
+  name               text not null,
+  address            text not null default '',
+  phone              text not null default '',
+  industry           text not null default '',
+  area               text not null default '',
+  category           text not null default '',
+  portal_host        text not null default '',
+  portal_url         text not null default '',
+  dedupe_key         text not null,
+  official_url       text not null default '',
+  resolution_status  text not null default 'hp_not_found',
+  resolution_attempts integer not null default 0,
+  resolution_score   integer not null default 0,
+  resolution_evidence jsonb not null default '[]'::jsonb,
+  last_attempted_at  text,
+  resolved_at        text,
+  last_error         text not null default '',
+  discovered_at      text not null,
+  unique(run_id, dedupe_key)
+);
+
+create index if not exists idx_discovered_businesses_project_id on public.discovered_businesses(project_id);
+create index if not exists idx_discovered_businesses_run_id on public.discovered_businesses(run_id);
+create index if not exists idx_discovered_businesses_status on public.discovered_businesses(resolution_status);
+create index if not exists idx_discovered_businesses_retry on public.discovered_businesses(project_id, area, industry, resolution_status);
 
 create table if not exists public.queue_jobs (
   id            text primary key,
@@ -113,6 +150,7 @@ alter table public.companies enable row level security;
 alter table public.projects enable row level security;
 alter table public.project_runs enable row level security;
 alter table public.search_candidates enable row level security;
+alter table public.discovered_businesses enable row level security;
 alter table public.queue_jobs enable row level security;
 alter table public.presets enable row level security;
 

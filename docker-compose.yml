@@ -34,7 +34,7 @@ services:
       # Disable task runner to avoid race condition on restart
       - N8N_RUNNERS_ENABLED=false
       # HTTP Request node timeout (default 10s is too short for bulk search)
-      - HTTP_TIMEOUT_MS=600000
+      - HTTP_TIMEOUT_MS=5400000
     env_file:
       - .env
     volumes:
@@ -84,6 +84,8 @@ services:
       - MAX_CONCURRENT_RUNS=${MAX_CONCURRENT_RUNS:-3}
       # Internal URL used by queue/complete to trigger next job
       - INTERNAL_BASE_URL=http://web:3000
+      - SCRAPE_ITEM_CPU_LIMIT_MS=${SCRAPE_ITEM_CPU_LIMIT_MS:-500}
+      - SCRAPE_ITEM_TEXT_LIMIT_CHARS=${SCRAPE_ITEM_TEXT_LIMIT_CHARS:-250000}
     env_file:
       - .env
     volumes:
@@ -91,6 +93,37 @@ services:
       - ./web/data:/app/data
     depends_on:
       - n8n
+    networks:
+      - form-ai-net
+
+  # Heavy search/scraping worker. Keeping it separate prevents CPU-intensive
+  # candidate processing from blocking the dashboard on port 3000.
+  worker:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: form-ai-worker
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - N8N_BASE_URL=http://n8n:5678
+      - N8N_API_KEY=${N8N_API_KEY}
+      - N8N_WORKFLOW_ID=${N8N_WORKFLOW_ID}
+      - N8N_WEBHOOK_PATH=list-collect
+      - GOOGLE_SHEETS_ID=${GOOGLE_SHEETS_ID}
+      - CONFIG_DIR=/app/config
+      - MAX_CONCURRENT_RUNS=1
+      - INTERNAL_BASE_URL=http://web:3000
+      - SCRAPE_ITEM_CPU_LIMIT_MS=${SCRAPE_ITEM_CPU_LIMIT_MS:-500}
+      - SCRAPE_ITEM_TEXT_LIMIT_CHARS=${SCRAPE_ITEM_TEXT_LIMIT_CHARS:-250000}
+    env_file:
+      - .env
+    volumes:
+      - ./config:/app/config:ro
+      - ./web/data:/app/data
     networks:
       - form-ai-net
 

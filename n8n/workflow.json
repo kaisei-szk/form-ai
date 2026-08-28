@@ -149,7 +149,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.WEB_CALLBACK_URL + \"/api/search/serper\" }}",
+        "url": "http://worker:3001/api/search/serper",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -163,7 +163,7 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ keywords: Array.isArray($json.keywords) ? $json.keywords : JSON.parse($json.keywords || JSON.stringify([$json.industry])), area: $json.area, maxResults: parseInt($json.maxResults) || 0, industry: $json.industry || undefined, projectId: $json.projectId || undefined, runId: $json.runId || undefined, resumeFromRunId: $json.resumeFromRunId || undefined }) }}",
         "options": {
-          "timeout": 1500000
+          "timeout": 5400000
         }
       },
       "id": "google-search",
@@ -377,7 +377,7 @@
       "waitBetweenTries": 5000,
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.WEB_CALLBACK_URL + \"/api/scrape-forms-bulk\" }}",
+        "url": "http://worker:3001/api/scrape-forms-bulk",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [

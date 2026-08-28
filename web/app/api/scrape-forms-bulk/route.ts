@@ -7,6 +7,10 @@ import { z } from 'zod'
 import OpenAI from 'openai'
 import { countCompanies, upsertRunCompanies } from '@/lib/companies-db'
 import { getProjectRun, updateRunStatus } from '@/lib/project-manager'
+import { upsertSearchCandidateVerifications } from '@/lib/search-candidates-db'
+import { getErrorMessage } from '@/lib/error-message'
+import { isExplicitNotFoundCandidate } from '@/lib/serper'
+import { ItemCpuLimitError, scanObfuscatedEmail } from '@/lib/safe-text-scan'
 import {
   evaluateCandidateRelevance,
   isAddressInArea,
@@ -16,6 +20,16 @@ import {
 } from '@/lib/search-relevance'
 
 export const maxDuration = 300
+
+function boundedEnvInt(name: string, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(process.env[name] ?? '', 10)
+  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback
+}
+
+// Hard CPU watchdog for a single page's free-text scan. Network timeout is
+// controlled separately by timeoutMs in the request schema.
+const ITEM_CPU_LIMIT_MS = boundedEnvInt('SCRAPE_ITEM_CPU_LIMIT_MS', 500, 10, 5_000)
+const ITEM_TEXT_LIMIT_CHARS = boundedEnvInt('SCRAPE_ITEM_TEXT_LIMIT_CHARS', 250_000, 10_000, 1_000_000)
 
 // ── Global concurrency guard ───────────────────────────────────────
 // Allow at most MAX_CONCURRENT_BATCHES simultaneous scraping jobs to
@@ -283,6 +297,25 @@ export interface FormExtractResult {
   redirectedToNonOfficial?: boolean
   evidencePageKinds?: EvidencePageKind[]
   relevance?: CandidateRelevanceDecision
+}
+
+function skippedItemResult(candidate: CandidateInput, error: string): FormExtractResult {
+  return {
+    url: candidate.url,
+    baseUrl: candidate.baseUrl,
+    formUrl: null,
+    email: null,
+    phone: null,
+    address: null,
+    hasContactLink: false,
+    hasInlineForm: false,
+    hasEmailContact: false,
+    contactLinks: [],
+    formPageText: null,
+    formPageTitle: null,
+    formTypeHint: null,
+    error,
+  }
 }
 
 type JsonLdObject = Record<string, unknown>
@@ -897,9 +930,9 @@ function extractForms(html: string, baseUrl: string): {
   // to avoid spam bots. Normalize and extract these.
   let obfuscatedEmail: string | null = null
   if (!contactMailto && !contactPlainEmail) {
-    const obfM = plainText.match(/([a-zA-Z0-9._%+\-]{2,})[\s]*(?:\[at\]|\(at\)|【at】|＠|\s+at\s+|@)\s*([a-zA-Z0-9.\-]{2,}\.[a-zA-Z]{2,6})/i)
-    if (obfM) {
-      const candidate = `${obfM[1]}@${obfM[2]}`.replace(/\s+/g, '')
+    const matchedEmail = scanObfuscatedEmail(plainText, ITEM_CPU_LIMIT_MS, ITEM_TEXT_LIMIT_CHARS)
+    if (matchedEmail) {
+      const candidate = matchedEmail.replace(/\s+/g, '')
       // Basic sanity check: not ending in asset extensions
       if (!candidate.endsWith('.js') && !candidate.endsWith('.css') && !candidate.endsWith('.png')) {
         obfuscatedEmail = candidate
@@ -1471,6 +1504,11 @@ async function processItem(
   fetchFormPage: boolean
 ): Promise<FormExtractResult> {
   const { url, baseUrl } = candidate
+  // Search results sometimes expose soft-404 URLs/titles directly. Reject
+  // these before issuing any request or spending parser CPU.
+  if (isExplicitNotFoundCandidate(url, candidate.sourceTitle || candidate.sourceName || '')) {
+    return skippedItemResult(candidate, 'candidate_not_found')
+  }
   // Step 1: fetch HP
   const hpFetch = await fetchUrlWithRetry(url, timeoutMs)
   if (hpFetch.error || !hpFetch.html) {
@@ -1493,6 +1531,9 @@ async function processItem(
     .join(' ')
     .slice(0, 50_000)
   let homepageTitle = extractTitle(hpFetch.html).slice(0, 300)
+  if (isExplicitNotFoundCandidate(hpFetch.finalUrl || url, homepageTitle)) {
+    return skippedItemResult(candidate, 'candidate_not_found')
+  }
   const structuredPage = inspectStructuredPage(hpFetch.html)
   let evidencePageKinds: EvidencePageKind[] = []
 
@@ -2056,7 +2097,12 @@ async function processBatch(
 
       let promise = inFlight.get(item.url)
       if (!promise) {
-        promise = processItem(item, timeoutMs, fetchFormPage)
+        promise = processItem(item, timeoutMs, fetchFormPage).catch((error: unknown) => {
+          if (error instanceof ItemCpuLimitError) {
+            return skippedItemResult(item, error.code)
+          }
+          throw error
+        })
         inFlight.set(item.url, promise)
       }
       results[i] = await promise
@@ -2142,6 +2188,24 @@ export async function POST(req: NextRequest) {
         relevance,
       }
     })
+
+    let verificationPersistenceWarning: string | undefined
+    if (runId && projectId && evaluatedResults.length > 0) {
+      try {
+        await upsertSearchCandidateVerifications({
+          projectId,
+          runId,
+          candidates: items,
+          decisions: evaluatedResults.map((result) => ({
+            status: result.relevance.status,
+            reasons: result.relevance.reasons,
+          })),
+        })
+      } catch (error) {
+        // Candidate persistence must not discard otherwise valid company rows.
+        verificationPersistenceWarning = `候補判定の保存に失敗しました: ${getErrorMessage(error)}`
+      }
+    }
 
     // A temporary HP fetch failure must not erase an otherwise verified
     // official business listing. Keep it as an HP-only result (no form) when
@@ -2297,6 +2361,7 @@ export async function POST(req: NextRequest) {
         unknownCount,
         batchSavedCount,
         persistedCount,
+        verificationPersistenceWarning,
       },
     })
   } catch (e) {

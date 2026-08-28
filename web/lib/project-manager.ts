@@ -332,7 +332,9 @@ export async function rollupBatchRun(parentRunId: string): Promise<void> {
     'placesCandidateCount', 'organicCandidateCount', 'organicRawCandidateCount',
     'organicRejectedCount', 'organicQueriesExecuted', 'organicFailedQueries',
     'organicExhaustedQueryCount', 'organicPageCapReachedQueryCount',
-    'searchElapsedMs',
+    'searchElapsedMs', 'hpNotFoundCount', 'hpNotFoundSaved',
+    'retryLoadedCount', 'retryResolvedCount', 'retryRemainingCount',
+    'holdRetryLoadedCount', 'pendingRetryLoadedCount',
   ]
   const rolledResults: import('./types').BenchmarkResults = {
     totalCompanies: 0,

@@ -49,6 +49,9 @@ export interface SerperSearchStats {
   pageCapReachedQueryCount: number
   maxPages: number
   keywordsUsed: string[]
+  areaPartitionsUsed: string[]
+  placesQueryCount: number
+  organicQueryCount: number
   normalizedArea: string
 }
 
@@ -144,9 +147,24 @@ export function normalizeCandidateUrl(url: string): string {
   }
 }
 
-/** Titles that describe a comparison/list article rather than one business. */
+/** A search result that clearly points to an error page, not a business HP. */
+export function isExplicitNotFoundCandidate(url: string, title = ''): boolean {
+  const normalizedTitle = title.normalize('NFKC').trim()
+  const notFoundTitle = /(?:404\s*(?:not\s*found|error)|(?:page|ページ)(?:\s+is)?\s*not\s*found|ページが見つかりません|お探しのページ(?:は|が)見つかりません)/iu.test(normalizedTitle)
+  if (notFoundTitle) return true
+
+  try {
+    const path = new URL(url).pathname.normalize('NFKC').toLowerCase()
+    return /(?:^|\/)(?:page[-_]?404|404(?:[-_]?(?:not[-_]?found|error))?|not[-_]?found)(?:\.(?:html?|php))?(?:\/|$)/iu.test(path)
+  } catch {
+    return false
+  }
+}
+
+/** Titles that describe a comparison/list/error article rather than one business. */
 export function isNonOfficialOrganicTitle(title: string): boolean {
-  return /(?:一覧|ランキング|おすすめ|比較|口コミ|まとめ|検索|予約|求人|採用|転職|会社データ|企業データ|業者を探す|厳選|\d+\s*(?:社|店|選|件)|best\s+\d+|top\s+\d+)/iu.test(title)
+  return isExplicitNotFoundCandidate('', title)
+    || /(?:一覧|ランキング|おすすめ|比較|口コミ|まとめ|検索|予約|求人|採用|転職|会社データ|企業データ|業者を探す|厳選|\d+\s*(?:社|店|選|件)|best\s+\d+|top\s+\d+)/iu.test(title)
 }
 
 function normalizeAreaName(rawArea: string): string {
@@ -162,6 +180,22 @@ function normalizeAreaName(rawArea: string): string {
     '佐賀県', '長崎県', '熊本県', '大分県', '宮崎県', '鹿児島県', '沖縄県',
   ]
   return prefectures.find((prefecture) => prefecture.replace(/[都道府県]$/u, '') === area) ?? area
+}
+
+// A borough-wide Google ranking saturates before all local businesses are
+// exposed. Dense station/neighbourhood clusters are searched as independent
+// result pools, while the original municipality remains the strict address
+// filter. Curating known partitions avoids unsafe generic place-name guesses.
+const AREA_SEARCH_PARTITIONS: Record<string, string[]> = {
+  '渋谷区': [
+    '渋谷', '恵比寿', '代官山', '原宿', '神宮前', '表参道',
+    '千駄ヶ谷', '北参道', '代々木', '代々木上原', '参宮橋',
+    '初台', '幡ヶ谷', '笹塚', '広尾', '神泉', '松濤', '富ヶ谷',
+  ],
+}
+
+export function getAreaSearchPartitions(rawArea: string): string[] {
+  return [...(AREA_SEARCH_PARTITIONS[normalizeAreaName(rawArea)] ?? [])]
 }
 
 function normalizeForMatch(value: string): string {
@@ -292,6 +326,8 @@ export async function runSerperSearch(params: {
   requestDelayMs?: number
   timeBudgetMs?: number
   checkpoint?: SerperSearchCheckpoint
+  /** Override curated production partitions; [] performs a municipality-only run. */
+  areaPartitions?: string[]
   onProgress?: (
     progress: SerperSearchProgress,
     checkpoint?: SerperSearchCheckpoint,
@@ -306,7 +342,7 @@ export async function runSerperSearch(params: {
 }> {
   const startedAt = Date.now()
   const timeBudgetMs = params.timeBudgetMs
-    ?? readBoundedInt(process.env.SERPER_TIME_BUDGET_MS, 240_000, 60_000, 1_800_000)
+    ?? readBoundedInt(process.env.SERPER_TIME_BUDGET_MS, 2_700_000, 60_000, 3_600_000)
   const deadline = startedAt + timeBudgetMs
   const deadlineMarginMs = params.timeBudgetMs === undefined ? 35_000 : 0
   let searchTimeBudgetReached = false
@@ -318,9 +354,37 @@ export async function runSerperSearch(params: {
   )]
   // 業種同義語（美容室↔美容院など）を検索語にも展開して候補母数を広げる。
   // 入力キーワードを先頭に保ち、同義語は後ろへ追加する。
-  const synonymKeywords = expandIndustryTerms(inputKeywords)
-    .filter((keyword) => !inputKeywords.includes(keyword))
-  const keywords = [...inputKeywords, ...synonymKeywords].slice(0, 30)
+  // AI-generated long-tail terms are often highly overlapping. Prioritize the
+  // canonical synonym group near the front, then keep the remaining input for
+  // organic discovery. Places uses a smaller independent cap below.
+  const canonicalKeywords = expandIndustryTerms(inputKeywords.slice(0, 1))
+  const keywords = [...new Set([
+    ...inputKeywords.slice(0, 4),
+    ...canonicalKeywords,
+    ...inputKeywords.slice(4),
+  ])].slice(0, 30)
+  const placesQueryLimit = readBoundedInt(process.env.SERPER_PLACES_QUERY_LIMIT, 12, 1, 30)
+  const placesKeywords = keywords.slice(0, placesQueryLimit)
+  const areaPartitionLimit = readBoundedInt(process.env.SERPER_AREA_PARTITION_LIMIT, 18, 0, 50)
+  const areaPartitions = [...new Set(
+    (params.areaPartitions ?? getAreaSearchPartitions(normalizedArea))
+      .map((partition) => partition.normalize('NFKC').trim())
+      .filter(Boolean),
+  )].slice(0, areaPartitionLimit)
+  const partitionKeywordLimit = readBoundedInt(process.env.SERPER_PARTITION_KEYWORD_LIMIT, 3, 1, 10)
+  const placesTotalQueryLimit = readBoundedInt(process.env.SERPER_PLACES_TOTAL_QUERY_LIMIT, 72, 1, 200)
+  const placesQueries = [
+    ...placesKeywords.map((keyword) => ({
+      key: JSON.stringify([keyword, normalizedArea]),
+      keyword,
+      query: `${keyword} ${normalizedArea}`,
+    })),
+    ...areaPartitions.flatMap((partition) => placesKeywords.slice(0, partitionKeywordLimit).map((keyword) => ({
+      key: JSON.stringify([keyword, normalizedArea, partition]),
+      keyword,
+      query: `${keyword} ${normalizedArea} ${partition}`,
+    }))),
+  ].slice(0, placesTotalQueryLimit)
   const resultLimit = params.maxResults && params.maxResults > 0 ? params.maxResults : Number.POSITIVE_INFINITY
   const maxPages = params.maxPages ?? readBoundedInt(process.env.SERPER_MAX_PAGES, 50, 1, 50)
   const concurrency = readBoundedInt(process.env.SERPER_CONCURRENCY, 5, 1, 10)
@@ -334,6 +398,10 @@ export async function runSerperSearch(params: {
     maxPages,
     organicMaxPages,
     organicQueryLimit,
+    placesQueryLimit,
+    areaPartitions,
+    partitionKeywordLimit,
+    placesTotalQueryLimit,
     includeOrganic: params.includeOrganic !== false,
     maxResults: params.maxResults ?? 0,
   })
@@ -366,6 +434,9 @@ export async function runSerperSearch(params: {
     pageCapReachedQueryCount: 0,
     maxPages,
     keywordsUsed: keywords,
+    areaPartitionsUsed: areaPartitions,
+    placesQueryCount: placesQueries.length,
+    organicQueryCount: 0,
     normalizedArea,
   }
   const stats: SerperSearchStats = resume ? { ...freshStats, ...resume.stats } : freshStats
@@ -379,17 +450,34 @@ export async function runSerperSearch(params: {
   const exhaustedQueries = new Set(resume?.exhaustedQueries ?? [])
   const zeroNewPages = new Map(resume?.zeroNewPages ?? [])
   const errors = [...(resume?.errors ?? [])]
-  const organicVariants = ['公式', '会社概要', '']
-  const organicQueries = organicVariants
-    .flatMap((variant) => keywords.map((keyword) => ({
+  const makeOrganicQuery = (keyword: string, variant: string, partition = '') => ({
       // PostgreSQL jsonb cannot store U+0000. This key is persisted inside
       // search checkpoints, so use a collision-safe JSON tuple instead of a
       // NUL-delimited string.
-      key: JSON.stringify([keyword, variant || 'plain']),
+      key: JSON.stringify(partition
+        ? [keyword, variant || 'plain', partition]
+        : [keyword, variant || 'plain']),
       keyword,
-      query: [keyword, normalizedArea, variant].filter(Boolean).join(' '),
-    })))
+      query: [keyword, normalizedArea, partition, variant].filter(Boolean).join(' '),
+    })
+  const organicQueries = [
+    // Keep borough-wide high-signal queries first, then use neighbourhoods to
+    // escape result saturation before spending calls on long-tail terms.
+    ...keywords.slice(0, 6).flatMap((keyword) => [
+      makeOrganicQuery(keyword, '公式'),
+      makeOrganicQuery(keyword, ''),
+    ]),
+    ...areaPartitions.flatMap((partition) => placesKeywords.slice(0, 2).map(
+      (keyword) => makeOrganicQuery(keyword, '公式', partition),
+    )),
+    ...keywords.flatMap((keyword) => [
+      makeOrganicQuery(keyword, '会社概要'),
+      makeOrganicQuery(keyword, '公式'),
+    ]),
+  ]
+    .filter((query, index, all) => all.findIndex((other) => other.key === query.key) === index)
     .slice(0, organicQueryLimit)
+  stats.organicQueryCount = organicQueries.length
   const organicExhausted = new Set(resume?.organicExhausted ?? [])
   const organicZeroNewPages = new Map(resume?.organicZeroNewPages ?? [])
   const organicSeenByKeyword = new Map((resume?.organicSeenByKeyword ?? []).map(([key, values]) => [key, new Set(values)]))
@@ -401,7 +489,7 @@ export async function runSerperSearch(params: {
   const refreshStats = () => {
     stats.candidateCount = items.length
     stats.exhaustedQueryCount = exhaustedQueries.size
-    stats.pageCapReachedQueryCount = keywords.filter((keyword) => !exhaustedQueries.has(keyword)).length
+    stats.pageCapReachedQueryCount = placesQueries.filter((query) => !exhaustedQueries.has(query.key)).length
     stats.organicExhaustedQueryCount = organicExhausted.size
     stats.organicPageCapReachedQueryCount = organicQueries.filter((query) => !organicExhausted.has(query.key)).length
     stats.searchElapsedMs = priorElapsedMs + Date.now() - startedAt
@@ -450,9 +538,9 @@ export async function runSerperSearch(params: {
   if (phase === 'places') {
     let placesCompleted = true
     placesLoop: for (let page = nextPage; page <= maxPages && items.length < resultLimit; page++) {
-      const activeKeywords = keywords.filter((keyword) => !exhaustedQueries.has(keyword))
-      if (activeKeywords.length === 0) break
-      for (let offset = 0; offset < activeKeywords.length && items.length < resultLimit; offset += concurrency) {
+      const activeQueries = placesQueries.filter((query) => !exhaustedQueries.has(query.key))
+      if (activeQueries.length === 0) break
+      for (let offset = 0; offset < activeQueries.length && items.length < resultLimit; offset += concurrency) {
         if (!hasTimeForBatch()) {
           searchTimeBudgetReached = true
           placesCompleted = false
@@ -460,13 +548,13 @@ export async function runSerperSearch(params: {
           await publishProgress()
           break placesLoop
         }
-        const batch = activeKeywords.slice(offset, offset + concurrency)
-        const responses = await Promise.all(batch.map(async (keyword) => ({
-          keyword,
-          response: await fetchPlacesPage(`${keyword} ${normalizedArea}`, page, params.apiKey),
+        const batch = activeQueries.slice(offset, offset + concurrency)
+        const responses = await Promise.all(batch.map(async (query) => ({
+          query,
+          response: await fetchPlacesPage(query.query, page, params.apiKey),
         })))
         stats.queriesExecuted += batch.length
-        for (const { keyword, response } of responses) {
+        for (const { query, response } of responses) {
           if (response.error) {
             stats.failedQueries++
             errors.push(response.error)
@@ -475,8 +563,8 @@ export async function runSerperSearch(params: {
           const places = response.places ?? []
           let newPlacesOnPage = 0
           stats.rawCandidateCount += places.length
-          const keywordSeen = seenPlacesByKeyword.get(keyword) ?? new Set<string>()
-          seenPlacesByKeyword.set(keyword, keywordSeen)
+          const keywordSeen = seenPlacesByKeyword.get(query.key) ?? new Set<string>()
+          seenPlacesByKeyword.set(query.key, keywordSeen)
           for (const place of places) {
             const placeKey = place.placeId || place.cid || `${place.title ?? ''}|${place.address ?? ''}`
             if (!placeKey) {
@@ -528,7 +616,7 @@ export async function runSerperSearch(params: {
               link,
               title: place.title ?? '',
               snippet: place.description ?? '',
-              keyword,
+              keyword: query.keyword,
               area: normalizedArea,
               source: 'places',
               address: place.address ?? '',
@@ -538,9 +626,9 @@ export async function runSerperSearch(params: {
             })
             if (items.length >= resultLimit) break
           }
-          const consecutiveEmpty = newPlacesOnPage === 0 ? (zeroNewPages.get(keyword) ?? 0) + 1 : 0
-          zeroNewPages.set(keyword, consecutiveEmpty)
-          if (consecutiveEmpty >= 2) exhaustedQueries.add(keyword)
+          const consecutiveEmpty = newPlacesOnPage === 0 ? (zeroNewPages.get(query.key) ?? 0) + 1 : 0
+          zeroNewPages.set(query.key, consecutiveEmpty)
+          if (consecutiveEmpty >= 2) exhaustedQueries.add(query.key)
         }
         nextPage = page
         await publishProgress()
@@ -607,7 +695,8 @@ export async function runSerperSearch(params: {
             const host = extractHost(normalizedUrl)
             const blockedHost = !host || isNonProductionHost(host) || SKIP_DOMAINS.has(host)
               || [...SKIP_DOMAINS].some((domain) => host.endsWith(`.${domain}`))
-            if (blockedHost || isNonOfficialOrganicTitle(result.title ?? '')) {
+            if (blockedHost || isNonOfficialOrganicTitle(result.title ?? '')
+              || isExplicitNotFoundCandidate(normalizedUrl, result.title ?? '')) {
               stats.organicRejectedCount++
               continue
             }

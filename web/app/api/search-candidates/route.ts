@@ -25,6 +25,8 @@ export async function GET(req: NextRequest) {
       runId,
       runIds,
       search: searchParams.get('search') || undefined,
+      verificationStatus: (searchParams.get('verificationStatus') || undefined) as
+        | 'pending' | 'accepted' | 'hold' | 'rejected' | undefined,
       limit,
       offset: (page - 1) * limit,
     }
@@ -47,7 +49,12 @@ export async function GET(req: NextRequest) {
       for (const run of runs) {
         const checkpoint = await getRunSearchCheckpoint(run.id)
         if (checkpoint?.items?.length) {
-          await upsertSearchCandidates({ projectId, runId: run.id, candidates: checkpoint.items })
+          await upsertSearchCandidates({
+            projectId,
+            runId: run.id,
+            candidates: checkpoint.items,
+            industry: run.searchTarget.industry,
+          })
         }
       }
       result = await getSearchCandidates(filters)

@@ -5,8 +5,78 @@ import {
   domainMatchesBusinessName,
   extractBusinessesFromHtml,
   extractDetailLinks,
+  extractHotPepperListingPage,
   isShallowSiteUrl,
+  normalizeHotPepperListingUrl,
+  scoreOfficialSearchResult,
+  supportsHotPepper,
 } from './portal-discovery.ts'
+
+test('official search scoring tolerates bracketed reading and branch labels', () => {
+  const scored = scoreOfficialSearchResult({
+    name: 'KENJE HOMME SHIBUYA［ケンジ オム シブヤ］',
+    address: '東京都渋谷区神南1-1-1',
+    phone: '03-1234-5678',
+    category: '美容院',
+  }, {
+    link: 'https://kenje-group.co.jp/salon/shibuya/',
+    title: 'KENJE HOMME SHIBUYA | メンズヘアサロン',
+    snippet: '東京都渋谷区神南の美容院です。TEL 03-1234-5678',
+  }, '渋谷区')
+  assert.ok(scored.strongIdentity)
+  assert.ok(scored.score >= 10)
+  assert.ok(scored.evidence.includes('search_phone_match'))
+})
+
+test('comparison results never receive an official-site score', () => {
+  const scored = scoreOfficialSearchResult({
+    name: 'サロンA', address: '', phone: '', category: '美容室',
+  }, {
+    link: 'https://example.com/ranking',
+    title: '渋谷区のおすすめ美容室20選',
+    snippet: 'サロンAを含む人気店を比較',
+  }, '渋谷区')
+  assert.equal(scored.strongIdentity, false)
+  assert.ok(scored.score < 0)
+})
+
+test('Hot Pepper support is enabled only for covered beauty industries', () => {
+  assert.equal(supportsHotPepper(['美容室', 'ヘアサロン']), true)
+  assert.equal(supportsHotPepper(['ネイルサロン']), true)
+  assert.equal(supportsHotPepper(['人材紹介会社']), false)
+})
+
+test('Hot Pepper pagination URL normalizes to the municipality listing root', () => {
+  assert.equal(
+    normalizeHotPepperListingUrl('https://beauty.hotpepper.jp/pre13/city11300000/PN12/'),
+    'https://beauty.hotpepper.jp/pre13/city11300000/',
+  )
+  assert.equal(
+    normalizeHotPepperListingUrl('https://beauty.hotpepper.jp/relax/pre13/city11300000/PN2/'),
+    'https://beauty.hotpepper.jp/relax/pre13/city11300000/',
+  )
+  assert.equal(normalizeHotPepperListingUrl('https://beauty.hotpepper.jp/slnH000123456/'), null)
+})
+
+test('Hot Pepper listing page enumerates each salon and total page count', () => {
+  const html = `
+    <p>1/65ページ</p>
+    <h3 class="slnName"><a href="https://beauty.hotpepper.jp/slnH000111111/?cstt=1">サロンA 渋谷店</a></h3>
+    <h3 class="slnName is-new"><a href="/slnH000222222/?cstt=2">サロンA 原宿店</a></h3>
+    <script type="application/ld+json">{
+      "@type":"SaleEvent",
+      "location":{"url":"https://beauty.hotpepper.jp/slnH000111111/map/","address":{"name":"東京都渋谷区神南1-1-1"}}
+    }</script>`
+  const result = extractHotPepperListingPage(
+    html,
+    'https://beauty.hotpepper.jp/pre13/city11300000/',
+    '美容室',
+  )
+  assert.equal(result.totalPages, 65)
+  assert.deepEqual(result.businesses.map((business) => business.name), ['サロンA 渋谷店', 'サロンA 原宿店'])
+  assert.equal(result.businesses[0].address, '東京都渋谷区神南1-1-1')
+  assert.equal(result.businesses[0].portalUrl, 'https://beauty.hotpepper.jp/slnH000111111/')
+})
 
 test('JSON-LD business entries are extracted with official links', () => {
   const html = `

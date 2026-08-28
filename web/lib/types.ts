@@ -88,6 +88,18 @@ export interface BenchmarkResults {
   organicMaxPages?: number
   searchTimeBudgetReached?: boolean
   portalDeadlineReached?: boolean
+  hotPepperEnabled?: boolean
+  hotPepperListingPagesFetched?: number
+  hotPepperBusinessesEnumerated?: number
+  hotPepperDetailPagesFetched?: number
+  hotPepperDetailFetchFailedCount?: number
+  hpNotFoundCount?: number
+  hpNotFoundSaved?: number
+  retryLoadedCount?: number
+  retryResolvedCount?: number
+  retryRemainingCount?: number
+  holdRetryLoadedCount?: number
+  pendingRetryLoadedCount?: number
   searchElapsedMs?: number
   relevanceReasonCounts?: Record<string, number>
   expectedCandidateCount?: number
