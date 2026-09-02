@@ -42,3 +42,19 @@ test('normal CSV export remains isolated from discovery candidates', async () =>
   assert.match(candidateExport, /getAllSearchCandidates/)
   assert.match(candidateExport, /候補サイト名/)
 })
+
+test('scraping is split into bounded, high-concurrency batches without whole-batch retry loops', async () => {
+  const workflow = JSON.parse(
+    await readFile(new URL('../n8n/workflow.json', import.meta.url), 'utf8'),
+  )
+  const collectNode = workflow.nodes.find((node) => node.name === 'URL収集')
+  const scrapeNode = workflow.nodes.find((node) => node.name === 'L-03: スクレイプAPI')
+
+  assert.ok(collectNode)
+  assert.ok(scrapeNode)
+  assert.match(collectNode.parameters.jsCode, /const BATCH_SIZE = 40/)
+  assert.equal(scrapeNode.parameters.options.timeout, 900_000)
+  assert.equal(scrapeNode.maxTries, 2)
+  assert.match(scrapeNode.parameters.jsonBody, /timeoutMs: 12000/)
+  assert.match(scrapeNode.parameters.jsonBody, /concurrency: 40/)
+})

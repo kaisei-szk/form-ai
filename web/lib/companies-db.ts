@@ -193,6 +193,34 @@ export async function countCompanies(filters?: Omit<CompanyFilters, 'limit' | 'o
   return count ?? 0
 }
 
+/**
+ * Read every company belonging to one run without relying on Supabase's
+ * per-request row cap. Completion-time name repair must also cover runs with
+ * more than 1,000 accepted sites.
+ */
+export async function getAllCompaniesForRun(runId: string): Promise<Company[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSupabase() as any
+  const companies: Company[] = []
+  const PAGE_SIZE = 500
+
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from('companies')
+      .select('*')
+      .eq('run_id', runId)
+      .order('collected_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1)
+    if (error) throw error
+    const page = (data ?? []).map(rowToCompany)
+    companies.push(...page)
+    if (page.length < PAGE_SIZE) break
+  }
+
+  return companies
+}
+
 export async function countCompaniesAndFormCount(
   filters?: Omit<CompanyFilters, 'limit' | 'offset'>
 ): Promise<{ total: number; formCount: number; phoneCount: number; emailCount: number }> {
@@ -530,6 +558,21 @@ export async function updateCompany(id: string, updates: { status?: string; note
   const { data, error } = await supabase
     .from('companies')
     .update(fieldsToUpdate)
+    .eq('id', id)
+    .select('id')
+  if (error) throw error
+  return (data?.length ?? 0) > 0
+}
+
+/** Update only the display name. Used by the completion-time official-name repair. */
+export async function updateCompanyName(id: string, name: string): Promise<boolean> {
+  const normalizedName = name.normalize('NFKC').replace(/\s+/g, ' ').trim()
+  if (!id || !normalizedName) return false
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const supabase = getSupabase() as any
+  const { data, error } = await supabase
+    .from('companies')
+    .update({ name: normalizedName })
     .eq('id', id)
     .select('id')
   if (error) throw error

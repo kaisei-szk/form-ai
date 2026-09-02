@@ -373,7 +373,7 @@
       ],
       "continueOnFail": true,
       "retryOnFail": true,
-      "maxTries": 5,
+      "maxTries": 2,
       "waitBetweenTries": 5000,
       "parameters": {
         "method": "POST",
@@ -390,7 +390,7 @@
         "sendBody": true,
         "specifyBody": "json",
         "options": {
-          "timeout": 600000,
+          "timeout": 900000,
           "batching": {
             "batch": {
               "batchSize": 1,
@@ -398,7 +398,7 @@
             }
           }
         },
-        "jsonBody": "={{ ({ items: $json.urlItems, runId: $json.runId, projectId: $json.projectId, batchId: $json.batchId, timeoutMs: 8000, concurrency: 20, fetchFormPage: true }) }}"
+        "jsonBody": "={{ ({ items: $json.urlItems, runId: $json.runId, projectId: $json.projectId, batchId: $json.batchId, timeoutMs: 12000, concurrency: 40, fetchFormPage: true }) }}"
       }
     },
     {
@@ -412,7 +412,7 @@
       ],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "\n// Serper候補と検索根拠をまとめ、欠落確認できる安定ID付きバッチへ分割する\nconst items = $input.all();\nconst p = $('L-01: 検索パラメータ設定').first().json;\nconst keywords = Array.isArray(p.keywords) ? p.keywords : JSON.parse(p.keywords || '[]');\nlet rawItems = [];\ntry { rawItems = $('検索結果を分割').all().map(i => i.json); } catch(e) {}\nconst rawByUrl = new Map(rawItems.filter(r => r.link).map(r => [r.link, r]));\nconst records = items.map(({ json: c }) => {\n  const raw = rawByUrl.get(c.companyUrl) || {};\n  return {\n    company: c,\n    urlItem: {\n      url: c.companyUrl || '',\n      baseUrl: c.companyUrl || '',\n      industry: p.industry || '',\n      keywords,\n      area: p.area || '',\n      searchArea: raw.area || p.area || '',\n      source: raw.source || undefined,\n      sourceName: c.companyName || raw.title || '',\n      sourceTitle: raw.title || c.companyName || '',\n      sourceSnippet: raw.snippet || '',\n      sourceAddress: raw.address || '',\n      sourcePhone: raw.phone || '',\n      sourceCategory: raw.category || '',\n    },\n  };\n}).filter(record => record.urlItem.url);\n\nconst BATCH_SIZE = 150;\nconst batches = [];\nfor (let offset = 0; offset < records.length; offset += BATCH_SIZE) {\n  const batch = records.slice(offset, offset + BATCH_SIZE);\n  const sequence = batches.length + 1;\n  batches.push({ json: {\n    batchId: `${p.runId || 'run'}:${String(sequence).padStart(4, '0')}`,\n    runId: p.runId || '',\n    projectId: p.projectId || '',\n    urlItems: batch.map(record => record.urlItem),\n    companies: batch.map(record => record.company),\n  }});\n}\nif (!batches.length) {\n  batches.push({ json: {\n    batchId: `${p.runId || 'run'}:0001`,\n    runId: p.runId || '',\n    projectId: p.projectId || '',\n    urlItems: [],\n    companies: [],\n  }});\n}\nreturn batches;\n"
+        "jsCode": "\n// Serper候補と検索根拠をまとめ、欠落確認できる安定ID付きバッチへ分割する\nconst items = $input.all();\nconst p = $('L-01: 検索パラメータ設定').first().json;\nconst keywords = Array.isArray(p.keywords) ? p.keywords : JSON.parse(p.keywords || '[]');\nlet rawItems = [];\ntry { rawItems = $('検索結果を分割').all().map(i => i.json); } catch(e) {}\nconst rawByUrl = new Map(rawItems.filter(r => r.link).map(r => [r.link, r]));\nconst records = items.map(({ json: c }) => {\n  const raw = rawByUrl.get(c.companyUrl) || {};\n  return {\n    company: c,\n    urlItem: {\n      url: c.companyUrl || '',\n      baseUrl: c.companyUrl || '',\n      industry: p.industry || '',\n      keywords,\n      area: p.area || '',\n      searchArea: raw.area || p.area || '',\n      source: raw.source || undefined,\n      sourceName: c.companyName || raw.title || '',\n      sourceTitle: raw.title || c.companyName || '',\n      sourceSnippet: raw.snippet || '',\n      sourceAddress: raw.address || '',\n      sourcePhone: raw.phone || '',\n      sourceCategory: raw.category || '',\n    },\n  };\n}).filter(record => record.urlItem.url);\n\n// Keep each request small enough to finish before n8n's HTTP timeout and\n// persist progress frequently. Candidate selection itself is unchanged.\nconst BATCH_SIZE = 40;\nconst batches = [];\nfor (let offset = 0; offset < records.length; offset += BATCH_SIZE) {\n  const batch = records.slice(offset, offset + BATCH_SIZE);\n  const sequence = batches.length + 1;\n  batches.push({ json: {\n    batchId: `${p.runId || 'run'}:${String(sequence).padStart(4, '0')}`,\n    runId: p.runId || '',\n    projectId: p.projectId || '',\n    urlItems: batch.map(record => record.urlItem),\n    companies: batch.map(record => record.company),\n  }});\n}\nif (!batches.length) {\n  batches.push({ json: {\n    batchId: `${p.runId || 'run'}:0001`,\n    runId: p.runId || '',\n    projectId: p.projectId || '',\n    urlItems: [],\n    companies: [],\n  }});\n}\nreturn batches;\n"
       }
     },
     {

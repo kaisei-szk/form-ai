@@ -5,6 +5,7 @@ import { markJobDone, isQueueIdle } from '@/lib/run-queue'
 import { calcCostUsd } from '@/lib/n8n-sync'
 import { countCompanies, upsertRunCompanies } from '@/lib/companies-db'
 import { getErrorMessage } from '@/lib/error-message'
+import { repairSuspiciousBusinessNames } from '@/lib/business-name-repair'
 import type { CompanyInput } from '@/lib/companies-db'
 
 const ResultsSchema = z.object({
@@ -184,6 +185,24 @@ export async function POST(
       ?? pendingCandidateCount === 0
     const discoveryIncomplete = body.results?.searchTimeBudgetReached === true
       || body.results?.portalDeadlineReached === true
+    const incompleteResultSet = body.status === 'success' && !resultSetComplete
+
+    // Final display-only correction. Search, relevance admission, form finding,
+    // row count and CSV membership are already fixed at this point. Revisit only
+    // names such as "会社概要" or "お問い合わせ" and update them from the
+    // already-selected official website. A failed lookup preserves the old name.
+    let nameRepair: Awaited<ReturnType<typeof repairSuspiciousBusinessNames>> | undefined
+    let nameRepairWarning: string | undefined
+    if (body.status === 'success' && !incompleteResultSet && !discoveryIncomplete) {
+      try {
+        nameRepair = await repairSuspiciousBusinessNames(runId)
+      } catch (error) {
+        // Name repair is best-effort and must never turn an otherwise complete
+        // search into a failed run or change which rows reach the CSV.
+        nameRepairWarning = `正式会社名の再確認に失敗しました: ${getErrorMessage(error)}`
+      }
+    }
+
     const normalizedResults = body.results ? {
       ...body.results,
       itemsWritten,
@@ -197,12 +216,15 @@ export async function POST(
           resumeAvailable: discoveryIncomplete,
         },
       } : {}),
+      ...(nameRepair ? { nameRepair } : {}),
+      ...(nameRepairWarning ? {
+        warnings: [...new Set([...(body.results.warnings ?? []), nameRepairWarning])],
+      } : {}),
     } : undefined
     const preservedCheckpoint = discoveryIncomplete
       ? await getRunSearchCheckpoint(runId)
       : undefined
 
-    const incompleteResultSet = body.status === 'success' && !resultSetComplete
     const finalStatus = incompleteResultSet || discoveryIncomplete ? 'error' : body.status
     const finalError = discoveryIncomplete
       ? '検索の時間予算に到達しました。途中結果と再開位置を保存済みです。「続きから再開」で処理を継続できます。'
